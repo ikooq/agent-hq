@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent HQ</title>
+<link rel="stylesheet" href="/web/style.css">
+<script type="importmap">
+  { "imports": { "three": "/vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+<div id="scene"></div>
+
+<header class="glass">
+  <div class="brand"><span class="logo"></span><div><div class="bt">Agent HQ</div><div class="clock"><span id="clock">--:--:--</span> · <span id="date"></span></div></div></div>
+  <div class="kpis" id="kpis"></div>
+  <div class="hright"><div id="hbtns"></div><div id="conn">connecting…</div></div>
+</header>
+
+<aside id="side" class="glass">
+  <section class="sec team"><h2>Team <span class="n" id="teamCount">0</span></h2><div class="list" id="team"></div></section>
+  <section class="sec feed"><h2>Activity</h2><div class="list" id="feed"></div></section>
+</aside>
+
+<footer class="glass">
+  <div class="legend" id="legend"></div>
+  <div class="pipe"><div class="ptitle" id="pipeTitle">Select an agent to see its task</div>
+    <div class="stages" id="pipeline">
+      <div class="stage" data-stage="requested"><b>Requested</b><em>—</em></div><span class="arr">→</span>
+      <div class="stage" data-stage="working"><b>Working</b><em>—</em></div><span class="arr">→</span>
+      <div class="stage" data-stage="approval"><b>Approval</b><em>—</em></div><span class="arr">→</span>
+      <div class="stage" data-stage="done"><b>Done</b><em>—</em></div>
+    </div></div>
+  <div class="ctrls">
+    <div class="segs" id="tod" title="Time of day"></div>
+    <label class="qsel">Quality <select id="quality"><option value="auto">Auto</option><option value="high">High</option><option value="low">Low</option></select></label>
+    <span id="qualityNow" class="muted"></span>
+  </div>
+</footer>
+
+<aside id="card" class="solid"></aside>
+<div id="insights" class="modal"></div>
+<div id="hint">Drag to orbit · scroll to zoom · click an agent to follow it · <kbd>Esc</kbd> back · <kbd>F</kbd> perf</div>
+
+<script type="module" src="/web/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# Personal runtime data: stays on this machine
+events-*.jsonl
+events.jsonl
+events.v1-migrated.jsonl
+stats/
+server.log
+server.pid
+settings.json
+soak-*.csv
+screenshots/
+screenshot-*.png
+node_modules/
