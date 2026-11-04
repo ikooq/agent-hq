@@ -10,4 +10,5 @@ soak-*.csv
 screenshots/
 screenshot-*.png
 reports/
+secret
 node_modules/

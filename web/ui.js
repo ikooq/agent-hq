@@ -59,6 +59,11 @@ export class UI {
     // lists: event delegation
     $('team').addEventListener('click', e => { const r = e.target.closest('[data-bot]'); if (r) this.onSelect(r.dataset.robot || null, r.dataset.bot); });
     $('feed').addEventListener('click', e => { const r = e.target.closest('[data-bot]'); if (r) this.onSelect(null, r.dataset.bot); });
+    // approvals: Allow once / Deny (Waiting list + kiosk panel), event delegation
+    const onDecide = e => { const b = e.target.closest('[data-decide]'); if (b) { e.stopPropagation(); this.decide(b.dataset.id, b.dataset.decide, b); return true; } return false; };
+    $('waitList').addEventListener('click', e => { if (onDecide(e)) return; const r = e.target.closest('[data-bot]'); if (r) this.onSelect(r.dataset.robot || null, r.dataset.bot); });
+    $('kiosk').addEventListener('click', onDecide);
+    setInterval(() => this.tickCountdowns(), 1000);
     // card + insights
     this.card = $('card'); this.modal = $('insights');
     this.modal.addEventListener('click', e => { if (e.target === this.modal) this.closeInsights(); });
@@ -97,8 +102,66 @@ export class UI {
     setText(this.kpi.done.val, s.finished.length); setText(this.kpi.done.sub, s.finished[0] ? `last: ${s.finished[0].bot} ${hhmm(s.finished[0].time)}` : '—');
     setText(this.kpi.tokens.val, fmtTok(s.totals.total)); setText(this.kpi.tokens.sub, `${usd(s.totals)} est. · in+out`);
     this.kpi.tokens.el.title = `Today: input ${num(s.totals.in)} · output ${num(s.totals.out)} · cache write ${num(s.totals.cw)} · cache read ${num(s.totals.cr)}\n$ from ~/.agent-hq/prices.json (Codex models unpriced unless added)`;
-    this.renderTeam(s); this.renderFeed(s); this.renderPipeline(); if (this.cardOpen) this.renderCard();
+    this.renderWaiting(s); this.renderTeam(s); this.renderFeed(s); this.renderPipeline(); if (this.cardOpen) this.renderCard();
     if (this.modal.classList.contains('show') && this.tab === 'timeline') this.loadTimeline(true);
+  }
+  // ---------- waiting on me + approvals (Claude Code only; Codex stays read-only) ----------
+  approvalFor(robotKey) { return (this.state && this.state.approvals || []).find(a => a.robot === robotKey) || null; }
+  approvalHTML(a, compact) {
+    return `<div class="appr" data-appr="${esc(a.id)}"><div class="appr-tool"><b>${esc(a.tool)}</b><span class="appr-left" data-until="${a.until}"></span></div>
+      <pre class="appr-detail${compact ? ' compact' : ''}">${esc(a.detail || '(no details)')}</pre>
+      <div class="appr-btns"><button class="abtn allow" data-decide="allow" data-id="${esc(a.id)}">Allow once</button><button class="abtn deny" data-decide="deny" data-id="${esc(a.id)}">Deny</button><span class="appr-msg"></span></div></div>`;
+  }
+  renderWaiting(s) {
+    const sec = $('waitSec'), host = $('waitList'), approvals = s.approvals || [];
+    const items = s.waiting.map(w => ({ w, a: approvals.find(a => a.robot === w.robot) || null }));
+    for (const a of approvals) if (!items.some(x => x.a === a)) items.push({ w: null, a });   // request whose robot is not on the floor yet
+    const key = JSON.stringify([items.map(x => [x.w && x.w.robot, x.w && x.w.message, x.a && x.a.id]), s.approvalsOn]);
+    sec.hidden = !items.length; setText($('waitCount'), items.length);
+    if (key !== this.waitKey) {
+      this.waitKey = key;
+      host.innerHTML = items.map(({ w, a }) => `<div class="wrow" ${w ? `data-bot="${esc(w.botId)}" data-robot="${esc(w.robot)}"` : ''}>
+        <div class="wl1"><b>${esc(w ? w.label : 'Claude Code')}</b><span class="muted">${w ? ago(w.since) : ''}</span></div>
+        ${a ? this.approvalHTML(a) : `<div class="wmsg">${esc(w.message || 'Needs your permission')}</div>${s.approvalsOn ? '' : (this.bench ? '' : '<div class="whint muted">Answer in the terminal · approvals from the office are off</div>')}`}</div>`).join('');
+    }
+    this.renderKiosk(approvals, s);
+    this.tickCountdowns();
+  }
+  renderKiosk(approvals, s) {
+    const k = $('kiosk'), a = approvals[0];
+    const key = a ? a.id + '|' + approvals.length : '';
+    k.hidden = !a;
+    if (key === this.kioskKey) return; this.kioskKey = key;
+    if (!a) { k.innerHTML = ''; return; }
+    const w = s.waiting.find(x => x.robot === a.robot);
+    k.innerHTML = `<div class="k-head">Approval kiosk${approvals.length > 1 ? ` · 1 of ${approvals.length}` : ''}</div><div class="k-who">${esc(w ? w.label : 'Claude Code')} wants to use</div>${this.approvalHTML(a, true)}`;
+  }
+  placeKiosk() {   // keep the kiosk panel next to the kiosk in the 3D office (only while a request is pending)
+    const k = $('kiosk'); if (k.hidden || !this.world.kioskGlow) return;
+    if (matchMedia('(max-width: 760px)').matches) { k.style.transform = ''; return; }   // phone layout: docked by CSS
+    const v = this.world.kioskGlow.clone().project(this.world.camera), H = this.world.viewH || innerHeight;
+    const x = Math.round((v.x * .5 + .5) * innerWidth), y = Math.round((-v.y * .5 + .5) * H);
+    const tx = Math.max(12, Math.min(innerWidth - k.offsetWidth - 12, x + 28)), ty = Math.max(90, Math.min(innerHeight - k.offsetHeight - 110, y - k.offsetHeight / 2));
+    const t = `translate(${tx}px, ${ty}px)`; if (k.style.transform !== t) k.style.transform = t;
+  }
+  tickCountdowns() {
+    for (const el of document.querySelectorAll('.appr-left[data-until]')) { const left = Math.max(0, Math.round((+el.dataset.until - Date.now()) / 1000)); setText(el, left ? `office closes in ${left} s · terminal works too` : 'answer in the terminal'); }
+  }
+  async token() {
+    if (this.tok) return this.tok;
+    const r = await (await fetch('/api/approvals/token', { cache: 'no-store' })).json(); this.tok = r.token; return this.tok;
+  }
+  async decide(id, decision, btn) {
+    const box = btn.closest('.appr'), msg = box && box.querySelector('.appr-msg');
+    for (const b of box ? box.querySelectorAll('button') : []) b.disabled = true;
+    try {
+      const tok = await this.token();
+      const res = await fetch('/api/approvals/decide', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-HQ-Secret': tok || '' }, body: JSON.stringify({ id, decision }) });
+      const j = await res.json().catch(() => ({}));
+      if (res.status === 403) this.tok = null;
+      if (msg) msg.textContent = res.ok ? (decision === 'allow' ? 'Allowed once' : 'Denied') : (j.error || 'Could not send');
+      if (!res.ok) for (const b of box.querySelectorAll('button')) b.disabled = false;
+    } catch (e) { if (msg) msg.textContent = 'Server offline'; }
   }
   renderTeam(s) {
     const order = { Research: 0, Content: 1, Visuals: 2, Ops: 3, Codex: 4 };

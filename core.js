@@ -245,8 +245,16 @@ function createEngine(opts = {}) {
       case 'SessionEnd': insertSorted(s.ends, t); break;
       case 'Notification': {
         const type = e.notification_type || '';
-        if (type === 'permission_prompt' || (!type && /permission/i.test(e.message || ''))) { insertSorted(s.perms, t); s.permMsgs.push([t, e.message || 'Needs your permission']); }
+        if (type === 'permission_prompt' || (!type && /permission/i.test(e.message || ''))) {
+          if (s.permReqAt && t - s.permReqAt < 60000 && t >= s.permReqAt) break;   // same prompt, already known from PermissionRequest
+          insertSorted(s.perms, t); s.permMsgs.push([t, e.message || 'Needs your permission']);
+        }
         else if (type === 'idle_prompt' || /waiting for your input/i.test(e.message || '')) insertSorted(s.rests, t);
+        break;
+      }
+      case 'PermissionRequest': {   // fires the moment Claude Code asks (the Notification comes ~6 s later)
+        s.permReqAt = t; insertSorted(s.perms, t);
+        s.permMsgs.push([t, clip(`Wants to use ${e.tool_name || 'a tool'}${e.detail ? ': ' + e.detail : ''}`, 160)]);
         break;
       }
       case 'SubagentStart': case 'SubagentStop': {

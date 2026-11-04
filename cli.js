@@ -87,12 +87,14 @@ function install() {
   const s = fs.existsSync(sf) ? JSON.parse(fs.readFileSync(sf, 'utf8')) : {};
   const cmd = `node "${path.join(HQ, 'hook.js').replace(/\\/g, '/')}"`;
   s.hooks = s.hooks || {};
-  const events = ['SessionStart', 'UserPromptSubmit', 'Notification', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop'];
+  const events = ['SessionStart', 'UserPromptSubmit', 'Notification', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop', 'PermissionRequest'];
   for (const ev of events) {
     const list = s.hooks[ev] = s.hooks[ev] || [];
+    const timeout = ev === 'PermissionRequest' ? 75 : 5;   // PermissionRequest waits up to 60 s for a decision from the office
     if (!list.some(g => (g.hooks || []).some(h => String(h.command || '').includes('.agent-hq/hook.js'))))
-      list.push({ hooks: [{ type: 'command', command: cmd, timeout: 5 }] });
+      list.push({ hooks: [{ type: 'command', command: cmd, timeout }] });
   }
+  try { require('./approvals').ensureSecret(HQ); } catch (e) {}
   fs.writeFileSync(sf, JSON.stringify(s, null, 2) + '\n');
   say(`hooks: ${events.join(', ')} -> ${sf}`);
   if (process.platform !== 'win32') return;
@@ -113,6 +115,35 @@ function install() {
     fs.writeFileSync(path.join(bin, 'agent-hq'), `#!/bin/sh\nexec node "$HOME/.agent-hq/cli.js" "$@"\n`);
     say(`command: ${path.join(bin, 'agent-hq.cmd')} (+ sh shim)`);
   } catch (e) { say('could not install the PATH shim:', e.message); }
+}
+
+// approvals from the office: off by default. `approvals on --lan` also allows deciding from the phone (Phase 5 LAN mode).
+function setSettings(fn) {
+  const f = path.join(HQ, 'settings.json');
+  let s = {}; try { s = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) {}
+  fn(s); fs.writeFileSync(f, JSON.stringify(s, null, 2));
+  return s;
+}
+function approvalsCmd(arg) {
+  const sf = path.join(os.homedir(), '.claude', 'settings.json');
+  let hooked = false; try { hooked = JSON.stringify(JSON.parse(fs.readFileSync(sf, 'utf8')).hooks.PermissionRequest || []).includes('.agent-hq/hook.js'); } catch (e) {}
+  if (arg === 'on') {
+    require('./approvals').ensureSecret(HQ);
+    const lan = process.argv.includes('--lan');
+    setSettings(s => { s.approvals = { enabled: true, lan }; });
+    say(`Approvals from the office: ON${lan ? ' (also from the phone over LAN)' : ' (this computer only; add --lan to allow the phone)'}`);
+    say('  Allow once / Deny apply to that single request only. The terminal prompt still works: whichever answer comes first wins;');
+    say('  the office stops offering a request after 60 s or as soon as it was answered in the terminal.');
+    if (!hooked) say('  Note: the PermissionRequest hook is not installed yet. Run: agent-hq install');
+  } else if (arg === 'off') {
+    setSettings(s => { s.approvals = { enabled: false, lan: false }; });
+    say('Approvals from the office: OFF (Claude Code asks in the terminal as usual).');
+  } else {
+    let s = {}; try { s = JSON.parse(fs.readFileSync(path.join(HQ, 'settings.json'), 'utf8')); } catch (e) {}
+    const a = s.approvals || {};
+    say(`Approvals from the office: ${a.enabled ? 'ON' + (a.lan ? ' (+ phone over LAN)' : '') : 'OFF'}${hooked ? '' : ' · PermissionRequest hook not installed (agent-hq install)'}`);
+    say('usage: agent-hq approvals on [--lan] | off');
+  }
 }
 
 async function bench() {
@@ -162,6 +193,7 @@ usage: agent-hq <command>
   bench     60 s browser benchmark with 15 fake agents (fps, p95, draw calls, heap)
   report    daily report from local logs: ~/.agent-hq/reports/YYYY-MM-DD.html (--date=YYYY-MM-DD, default today)
   soak      long run through a real server on a temp home (--minutes=60): leaks + slowdown, CSV in ~/.agent-hq
+  approvals on [--lan] | off   Allow once / Deny for Claude Code permission prompts from the office (off by default)
   install   (re)install hooks, hidden autostart and the agent-hq command`;
 
 (async () => {
@@ -180,6 +212,7 @@ usage: agent-hq <command>
     case 'bench': await bench(); break;
     case 'soak': await require('./soak').main(); break;
     case 'report': require('./report').main(process.argv.slice(3)); break;
+    case 'approvals': approvalsCmd(process.argv[3]); break;
     default: console.log(usage); if (cmd && cmd !== 'help' && cmd !== '--help') process.exitCode = 2;
   }
 })();

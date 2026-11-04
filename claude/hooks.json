@@ -75,5 +75,16 @@
         }
       ]
     }
+  ],
+  "PermissionRequest": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "node \"C:/Users/<you>/.agent-hq/hook.js\"",
+          "timeout": 75
+        }
+      ]
+    }
   ]
 }

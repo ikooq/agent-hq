@@ -11,6 +11,7 @@ const http = require('http'), fs = require('fs'), path = require('path'), os = r
 const { spawn } = require('child_process');
 const { createEngine } = require('./core');
 const { createGitWatcher } = require('./git');
+const { ensureSecret, sameSecret, createApprovals } = require('./approvals');
 
 const HQ = path.join(os.homedir(), '.agent-hq');
 const HOST = '127.0.0.1';
@@ -27,6 +28,17 @@ git = createGitWatcher({ roster: () => engine.roster(), expand: p => engine.expa
 let settings = { muted: false };
 try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS, 'utf8')) }; } catch (e) {}
 const saveSettings = () => { try { fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2)); } catch (e) {} };
+// settings.json is also written by `agent-hq approvals on|off` / `lan on|off`: re-read it when it changes
+function reloadSettings() {
+  let next = null; try { next = JSON.parse(fs.readFileSync(SETTINGS, 'utf8')); } catch (e) { return; }
+  const wasOn = approvalsOn(); settings = { muted: false, ...next };
+  if (wasOn && !approvalsOn()) approvals.cancelAll('approvals-off');
+  scheduleTick('settings', 0);
+}
+const approvalsOn = () => !!(settings.approvals && settings.approvals.enabled);
+// ---------- approvals from the office (Claude Code only, off by default) ----------
+const SECRET = ensureSecret(HQ);   // ~/.agent-hq/secret: random per install, gitignored
+const approvals = createApprovals({ hq: HQ, waitMs: +process.env.AGENT_HQ_APPROVAL_WAIT_MS || 60000, log, onChange: () => scheduleTick('approval', 0) });
 
 // ---------- Windows toast (built-in PowerShell + WinRT, no modules) ----------
 const TOAST_PS = `
@@ -54,7 +66,7 @@ function toast(title, body) {
 // ---------- state, diffs and the event stream ----------
 let state = null, seq = 0, prevStatus = null;
 const lastJSON = { bots: new Map(), top: {} };
-const TOP = ['teams', 'counts', 'waiting', 'stuck', 'finished', 'totals', 'feed', 'stuckAfterMin', 'today'];
+const TOP = ['teams', 'counts', 'waiting', 'stuck', 'finished', 'totals', 'feed', 'stuckAfterMin', 'today', 'approvals', 'approvalsOn'];
 const clients = new Set();
 let tickStats = { n: 0, ms: 0, maxMs: 0 };
 const recentTicks = [], recentPatches = [], recentParts = { read: [], build: [], diff: [] };   // [time, value] for the last 60 s (health + soak)
@@ -80,6 +92,9 @@ function tick(reason) {
   }
   prevStatus = new Map([...cur].map(([k, v]) => [k, v.r.status]));
   if (warm && !warmSeen) { warmSeen = true; log(`warm: history read in ${tickStats.n + 1} ticks`); startBackfill(); }
+  if (approvals.size()) { const ll = new Map(); for (const b of st.bots) for (const r of b.robots) if (r.kind === 'session') ll.set(r.id, r.lastLine || 0); approvals.withdrawAnswered(id => ll.get(id) || 0); }
+  st.approvals = approvalsOn() ? approvals.list() : [];
+  st.approvalsOn = approvalsOn();
   // diff against what clients already have
   const patch = { bots: [], removed: [] };
   const seen = new Set();
@@ -151,7 +166,7 @@ function watch(dir, opts, onName) {
 }
 function setupWatchers() {
   for (const w of watchers.splice(0)) try { w.close(); } catch (e) {}
-  watch(HQ, {}, n => { if (/^events-|^roster\.json$|^prices\.json$/.test(n)) scheduleTick('hq:' + n); });
+  watch(HQ, {}, n => { if (/^events-|^roster\.json$|^prices\.json$/.test(n)) scheduleTick('hq:' + n); else if (n === 'settings.json') setTimeout(reloadSettings, 50); });
   const projects = path.join(os.homedir(), '.claude', 'projects');
   watch(projects, { recursive: true }, n => { if (n.endsWith('.jsonl')) { engine.hint(path.join(projects, n)); scheduleTick('claude'); } });
   const cx = path.join(engine.CODEX, 'sessions');
@@ -166,9 +181,9 @@ function send(res, code, body, type = 'application/json; charset=utf-8', extra =
   res.writeHead(code, { ...SEC, 'Content-Type': type, ...extra });
   res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
 }
-function readBody(req, cb) {
+function readBody(req, cb, max = 4096) {
   let b = '';
-  req.on('data', d => { b += d; if (b.length > 4096) req.destroy(); });
+  req.on('data', d => { b += d; if (b.length > max) req.destroy(); });
   req.on('end', () => { try { cb(JSON.parse(b || '{}')); } catch (e) { cb(null); } });
 }
 // Only the first folder of a roster bot can be opened (in Explorer, or VS Code with app: 'vscode').
@@ -234,10 +249,24 @@ const server = http.createServer((req, res) => {
   if (!['127.0.0.1', 'localhost'].includes(host)) return send(res, 403, { error: 'forbidden host' });
   const url = req.url.split('?')[0];
 
+  if (req.method === 'POST' && url === '/api/approvals/request') {   // from hook.js: secret required, never from a browser page
+    if (req.headers.origin || !sameSecret(req.headers['x-hq-secret'], SECRET) || !/^application\/json/.test(req.headers['content-type'] || '')) return send(res, 403, { error: 'forbidden' });
+    return readBody(req, body => {
+      if (!body) return send(res, 400, { error: 'bad json' });
+      if (!approvalsOn()) return send(res, 200, { decision: null, off: true });
+      approvals.request(body, req, res);
+    }, 16384);
+  }
   if (req.method === 'POST') {
     if (!ORIGINS.includes(req.headers.origin) || !/^application\/json/.test(req.headers['content-type'] || '')) return send(res, 403, { error: 'forbidden origin' });
     return readBody(req, body => {
       if (!body) return send(res, 400, { error: 'bad json' });
+      if (url === '/api/approvals/decide') {   // the office: same origin (checked above) + the per-install secret
+        if (!sameSecret(req.headers['x-hq-secret'], SECRET)) return send(res, 403, { error: 'bad secret' });
+        if (!approvalsOn()) return send(res, 409, { error: 'approvals are off (agent-hq approvals on)' });
+        const r = approvals.decide(body.id, body.decision, 'office');
+        return send(res, r.code, r.body);
+      }
       if (url === '/api/mute') { settings.muted = !!body.muted; saveSettings(); return send(res, 200, settings); }
       if (url === '/api/open') { const r = openFolder(String(body.botId || ''), body.app === 'vscode' ? 'vscode' : null); return send(res, r.code, r.body); }
       return send(res, 404, { error: 'not found' });
@@ -265,6 +294,7 @@ const server = http.createServer((req, res) => {
         uptimeS: Math.round(process.uptime()), lastMinute: { ticks: summarize(recentTicks), patchBytes: summarize(recentPatches), read: summarize(recentParts.read), build: summarize(recentParts.build), diff: summarize(recentParts.diff) }, engine: engine.memStats() });
     }
     if (url === '/api/settings') return send(res, 200, settings);
+    if (url === '/api/approvals/token') return send(res, 200, { token: approvalsOn() ? SECRET : null, enabled: approvalsOn() });   // Host-checked; cross-site pages cannot read it
     if (url === '/report') {
       const q = new URLSearchParams(req.url.split('?')[1] || ''), day = q.get('date') || dayKey(Date.now());
       if (!require('./report').validDate(day)) return send(res, 400, { error: 'date must be YYYY-MM-DD' });

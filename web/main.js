@@ -67,7 +67,7 @@ function mergePatch(p) {
   for (const b of p.bots || []) byId.set(b.id, b);
   for (const id of p.removed || []) byId.delete(id);
   const next = { ...state, bots: [...byId.values()], seq: p.seq, now: p.now };
-  for (const k of ['teams', 'counts', 'waiting', 'stuck', 'finished', 'totals', 'feed', 'stuckAfterMin', 'today']) if (k in p) next[k] = p[k];
+  for (const k of ['teams', 'counts', 'waiting', 'stuck', 'finished', 'totals', 'feed', 'stuckAfterMin', 'today', 'approvals', 'approvalsOn']) if (k in p) next[k] = p[k];
   const prev = state; state = next; apply(next, prev); return true;
 }
 function connect() {
@@ -188,6 +188,7 @@ function loop(now) {
   if (now - qualityAt > 250) { qualityAt = now; world.autoQuality(perf.stats().fps, active, now); if ((world.frame = (world.frame || 0) + 1) % 4 === 0) world.updateSky(false); }
   if (now - gcAt > 5000) { gcAt = now; actors.gcSlots(); }
   if (benchFrame && !benchFrame(now)) benchFrame = null;
+  ui.placeKiosk(now);
 }
 perf.extra = () => `\nquality ${world.quality.mode}:${world.qualityLevel}  pr ${world.renderer.getPixelRatio()}\natlas uploads ${Object.values(world.atlases).reduce((a, x) => a + x.uploads, 0)}\nlast patch ${perf.lastPatchMs ? perf.lastPatchMs.toFixed(1) : '-'} ms  build ${perf.lastBuildMs ? perf.lastBuildMs.toFixed(0) : '-'} ms`;
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { last = performance.now(); requestAnimationFrame(loop); } });
