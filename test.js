@@ -448,6 +448,68 @@ async function approvalChecks(json) {
   check('approvals off again: decide refused', doff.code === 409, String(doff.code));
 }
 
+// ---------- LAN mode (phone): token link, cookie, read-only, approvals only with --lan ----------
+function lreq(ip, method, p, { headers = {}, body } = {}) {
+  return new Promise(resolve => {
+    const r = http.request({ host: ip, port: PORT, path: p, method, headers: { Host: `${ip}:${PORT}`, ...headers }, timeout: 3000 }, res => {
+      let b = ''; res.on('data', d => b += d); res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch (e) {} resolve({ code: res.statusCode, headers: res.headers, json: j, body: b }); });
+    });
+    r.on('error', e => resolve({ code: 0, err: e.code })); r.on('timeout', () => { r.destroy(); resolve({ code: 0, err: 'timeout' }); });
+    if (body) r.write(body); r.end();
+  });
+}
+async function lanChecks(json) {
+  const { qrMatrix } = require('./qr');
+  const qm = qrMatrix('http://192.168.0.10:7777/?t=0123456789abcdef0123456789abcdef');
+  const qh = require('crypto').createHash('sha256').update(qm.map(r => r.map(c => (c ? 1 : 0)).join('')).join('\n')).digest('hex');
+  // reference matrix: decoded correctly by zxing-cpp when this encoder was written (9/9 test strings, versions 1-10)
+  check('QR encoder: version 4 for a LAN link, same modules as the decoder-verified reference', qm.length === 33 && qh === 'de6907863bdd2d0cc9c05d97a63631f6c5ae8d65e30702e23efd5799417bec53', qh);
+  const { pickLanIp } = require('./lan'), ip = pickLanIp();
+  if (!ip) { console.log('SKIP  LAN checks (no private IPv4 address on this machine)'); return; }
+  const settingsFile = path.join(HQ, 'settings.json'), token = 'ab'.repeat(16);
+  const setS = fn => { const x = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); fn(x); fs.writeFileSync(settingsFile, JSON.stringify(x)); };
+  setS(x => { x.lan = { enabled: true, token }; });
+  let up = null; for (let i = 0; i < 30; i++) { up = await lreq(ip, 'GET', '/'); if (up.code) break; await new Promise(r => setTimeout(r, 150)); }
+  check(`LAN on: listens on ${ip}:${PORT}; without the token -> 401`, up && up.code === 401, JSON.stringify(up && { code: up.code, err: up.err }));
+  const bad = await lreq(ip, 'GET', '/?t=' + 'cd'.repeat(16));
+  const good = await lreq(ip, 'GET', '/?t=' + token);
+  const ck = String((good.headers || {})['set-cookie'] || '');
+  check('LAN: wrong token 401; right token -> cookie (HttpOnly, SameSite=Strict) + redirect to the mobile page', bad.code === 401 && good.code === 302 && /HttpOnly/.test(ck) && /SameSite=Strict/.test(ck) && good.headers.location === '/?m=1', ck);
+  const C = { Cookie: 'hq_lan=' + token };
+  const st = await lreq(ip, 'GET', '/state', { headers: C });
+  check('LAN: /state works with the cookie, viewer is read-only', st.code === 200 && st.json.viewer.lan === true && st.json.viewer.canControl === false && st.json.viewer.canApprove === false, JSON.stringify(st.json && st.json.viewer));
+  const evilHost = await lreq(ip, 'GET', '/state', { headers: { ...C, Host: 'evil.example:' + PORT } });
+  const hp = await lreq(ip, 'GET', '/api/health', { headers: C }), tk = await lreq(ip, 'GET', '/api/approvals/token', { headers: C });
+  check('LAN: foreign Host refused; health/token endpoints closed to the phone', evilHost.code === 403 && hp.code === 403 && tk.code === 403);
+  const O = { ...C, ...json, Origin: `http://${ip}:${PORT}` };
+  const mute = await lreq(ip, 'POST', '/api/mute', { headers: O, body: '{"muted":true}' });
+  const open = await lreq(ip, 'POST', '/api/open', { headers: O, body: '{"botId":"nexus"}' });
+  const hookReq = await lreq(ip, 'POST', '/api/approvals/request', { headers: { ...C, ...json, 'X-HQ-Secret': fs.readFileSync(path.join(HQ, 'secret'), 'utf8').trim() }, body: '{}' });
+  check('LAN: read-only (mute, open folder, hook endpoint refused)', mute.code === 403 && open.code === 403 && hookReq.code === 403, [mute.code, open.code, hookReq.code].join());
+  // approvals from the phone only with "approvals on --lan"
+  spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'approvals', 'on'], { env, encoding: 'utf8' });
+  await new Promise(r => setTimeout(r, 400));
+  const secret = fs.readFileSync(path.join(HQ, 'secret'), 'utf8').trim();
+  const sid = 'perm-1', permInput = cmd => ({ hook_event_name: 'PermissionRequest', session_id: sid, cwd: cwd('proj/locqa'), transcript_path: txp(sid), permission_mode: 'default', tool_name: 'Bash', tool_input: { command: cmd } });
+  const p1 = hookAsync(permInput('echo from-phone'));
+  let a = null; for (let i = 0; i < 40 && !a; i++) { const x = (await req('GET', '/state')).json; a = x && x.approvals.find(q => /from-phone/.test(q.detail)); if (!a) await new Promise(r => setTimeout(r, 100)); }
+  const noLan = await lreq(ip, 'POST', '/api/approvals/decide', { headers: { ...O, 'X-HQ-Secret': secret }, body: JSON.stringify({ id: a && a.id, decision: 'allow' }) });
+  check('LAN: approvals on (without --lan): the phone still cannot decide', noLan.code === 403, String(noLan.code));
+  spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'approvals', 'on', '--lan'], { env, encoding: 'utf8' });
+  await new Promise(r => setTimeout(r, 400));
+  const tk2 = await lreq(ip, 'GET', '/api/approvals/token', { headers: C });
+  const wrongOrigin = await lreq(ip, 'POST', '/api/approvals/decide', { headers: { ...O, Origin: 'http://127.0.0.1:' + PORT, 'X-HQ-Secret': secret }, body: JSON.stringify({ id: a && a.id, decision: 'allow' }) });
+  const okLan = await lreq(ip, 'POST', '/api/approvals/decide', { headers: { ...O, 'X-HQ-Secret': tk2.json && tk2.json.token }, body: JSON.stringify({ id: a && a.id, decision: 'allow' }) });
+  const r1 = await p1; let o1 = null; try { o1 = JSON.parse(r1.out); } catch (e) {}
+  check('LAN: with approvals on --lan the phone can Allow once (LAN origin + secret), logged as "phone"', wrongOrigin.code === 403 && okLan.code === 200 && o1 && o1.hookSpecificOutput.decision.behavior === 'allow'
+    && fs.readFileSync(path.join(HQ, `events-${monthKey(Date.now())}.jsonl`), 'utf8').includes('"by":"phone"'), [wrongOrigin.code, okLan.code, r1.out].join(' '));
+  spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'approvals', 'off'], { env, encoding: 'utf8' });
+  spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'lan', 'off'], { env, encoding: 'utf8' });
+  let gone = null; for (let i = 0; i < 20; i++) { gone = await lreq(ip, 'GET', '/state', { headers: C }); if (!gone.code) break; await new Promise(r => setTimeout(r, 150)); }
+  const lanSet = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).lan;
+  check('agent-hq lan off: LAN listener closed, token dropped', gone.code === 0 && lanSet.enabled === false && !lanSet.token, JSON.stringify(gone));
+}
+
 (async () => {
   try { await layoutChecks(); } catch (e) { check('layout/nav modules load in Node', false, e.message); }
   try { await gitChecks(); } catch (e) { check('git checks ran', false, e.stack); }
@@ -497,6 +559,7 @@ async function approvalChecks(json) {
   const rbad = await req('GET', '/report?date=../../x');
   check('server: /report rejects a bad date', rbad.code === 400);
   await approvalChecks(json);
+  await lanChecks(json);
   const pidFile = path.join(HQ, `server-${PORT}.pid`);
   check('server: PID file written', fs.existsSync(pidFile) && +fs.readFileSync(pidFile, 'utf8') === health.json.pid);
   const stop = spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'stop'], { env, encoding: 'utf8', timeout: 10000 });

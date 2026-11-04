@@ -481,7 +481,7 @@ export class World {
   // ---------- camera ----------
   setInsets(i) { this.insets = { ...this.insets, ...i }; this.resize(); }
   resize() {
-    const w = innerWidth, h = innerHeight; this.viewH = h;
+    const box = this.renderer.domElement.parentElement, w = (box && box.clientWidth) || innerWidth, h = (box && box.clientHeight) || innerHeight; this.viewW = w; this.viewH = h;
     this.renderer.setSize(w, h);
     const aspect = w / h, half = 10;
     Object.assign(this.camera, { left: -half * aspect, right: half * aspect, top: half, bottom: -half });

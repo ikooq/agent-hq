@@ -161,3 +161,24 @@ footer { position: fixed; left: 12px; right: 12px; bottom: 10px; height: 78px; d
 .kiosk .k-head { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--waiting, #e39a2d); } .kiosk .k-who { font-size: 13px; margin-top: 2px; }
 [hidden] { display: none !important; }
 .sec.waitsec { flex: none; } #waitList { padding: 0 8px 8px; }
+
+/* phone link + QR */
+.phone-card { width: min(420px, 92vw); } .phone-card .m-body { text-align: center; } .phone-card canvas { border-radius: 10px; border: 1px solid var(--hair); } .phone-card .mono { word-break: break-all; font-size: 12px; }
+/* LAN viewer (phone): read-only controls; approval buttons only with approvals on --lan */
+body.viewer-lan .bc-foot button, body.viewer-lan #hbtns .hbtn:last-child { display: none; }
+body:not(.can-approve) .appr-btns .abtn { display: none; }
+/* light mobile layout: the office on top, then Waiting and Team (Low quality) */
+@media (max-width: 760px) { body:not(.bench) { overflow: auto; } }
+body.mobile { overflow-y: auto !important; height: auto; display: flex; flex-direction: column; }
+body.mobile header { position: sticky; top: 0; left: 0; right: 0; margin: 0; border-radius: 0 0 14px 14px; order: 0; flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+body.mobile .brand { min-width: 0; } body.mobile .brand .clock { display: none; }
+body.mobile .kpis { order: 3; width: 100%; grid-template-columns: repeat(4, 1fr); gap: 6px; } body.mobile .kpi { padding: 6px 8px; } body.mobile .kicon, body.mobile .ksub { display: none; } body.mobile .kval { font-size: 18px; } body.mobile .klabel { font-size: 10px; }
+body.mobile .hright { margin-left: auto; } body.mobile #hbtns .hbtn.text span { display: none; }
+body.mobile #scene { position: relative; order: 1; height: 48vh; min-height: 260px; inset: auto; }
+body.mobile #side { position: static; order: 2; width: auto; margin: 8px; display: block; overflow: visible; }
+body.mobile #side .sec.feed { display: none; } body.mobile #side .list { max-height: none; overflow: visible; }
+body.mobile footer, body.mobile #hint { display: none; }
+body.mobile #card { top: 0; bottom: 0; right: 0; left: 0; width: auto; border-radius: 0; }
+body.mobile .kiosk { position: fixed; transform: none !important; left: 8px; right: 8px; bottom: 8px; top: auto; width: auto; }
+html.mobile { overflow-y: auto; height: auto; } html.mobile body { height: auto; min-height: 100%; }
+body.mobile .kpis { flex: 1 0 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); } body.mobile .kpi { min-width: 0; } body.mobile .klabel { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } body.mobile #scene { height: 42vh; }

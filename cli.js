@@ -146,6 +146,39 @@ function approvalsCmd(arg) {
   }
 }
 
+// LAN mode: the office on your phone over home Wi-Fi (opt-in). Never touches Windows Firewall.
+async function lanCmd(arg) {
+  const L = require('./lan');
+  if (arg === 'off') {
+    setSettings(s => { s.lan = { enabled: false }; });   // the token is dropped: old phone links stop working
+    say('LAN mode: OFF. The office listens on 127.0.0.1 only; the phone link no longer works.');
+    return;
+  }
+  if (arg !== 'on') {
+    let s = {}; try { s = JSON.parse(fs.readFileSync(path.join(HQ, 'settings.json'), 'utf8')); } catch (e) {}
+    say(`LAN mode: ${s.lan && s.lan.enabled ? 'ON' : 'OFF'}`); say('usage: agent-hq lan on [--ip=192.168.x.y] | off'); return;
+  }
+  const ipArg = (process.argv.find(a => a.startsWith('--ip=')) || '').slice(5) || null;
+  const ip = L.pickLanIp(ipArg);
+  if (!ip) { console.error('No private IPv4 address found. Connect to your home Wi-Fi (or pass --ip=).'); process.exitCode = 1; return; }
+  setSettings(s => { const keep = s.lan && s.lan.enabled && s.lan.token; s.lan = { enabled: true, token: keep || L.newToken(), ...(ipArg ? { ip: ipArg } : {}) }; });
+  if (!(await start())) return;
+  let info = null;
+  for (let i = 0; i < 30; i++) { info = await get('/api/lan', 1500); if (info && (info.listening || info.error)) break; await sleep(200); }
+  if (!info || !info.url) { console.error('The server did not open the LAN listener.', info && info.error ? info.error : ''); process.exitCode = 1; return; }
+  if (info.error && !info.listening) { console.error(`LAN listener failed: ${info.error}`); process.exitCode = 1; return; }
+  say(`LAN mode: ON. Open this on your phone (same Wi-Fi):\n\n  ${info.url}\n`);
+  say(require('./qr').qrTerminal(info.url));
+  say(`\nThe phone is read-only${info.approvals ? ', but it can Allow once / Deny (approvals on --lan)' : '. To approve from the phone too: agent-hq approvals on --lan'}.`);
+  say('The link holds a random token. agent-hq lan off turns LAN mode off and invalidates the link.');
+  const fw = L.firewallInfo(PORT, info.ip);
+  if (fw && !fw.rule) {
+    say(`\nWindows Firewall: no inbound rule for TCP ${PORT} found${fw.profile ? ` (this network is "${fw.profile}")` : ''}. If the phone cannot open the link,`);
+    say(`run this once in PowerShell as Administrator (Agent HQ does not change the firewall itself):\n\n  ${L.firewallCommand(PORT)}\n`);
+    if (fw.profile === 'Public') say(`This Wi-Fi is set to "Public", so a Private-only rule does not apply yet. If it is your home network, also run (as Administrator):\n\n  ${L.privateCommand(fw.alias || 'Wi-Fi')}\n\n(or Settings > Network & internet > Wi-Fi > this network > Private). Avoid opening the port on Public networks.`);
+  } else if (fw && fw.rule) say(`\nWindows Firewall: an inbound allow rule for TCP ${PORT} exists.`);
+}
+
 async function bench() {
   const secs = +(process.argv.find(a => /^--seconds=/.test(a)) || '--seconds=60').split('=')[1];
   if (!(await start())) return;
@@ -193,6 +226,7 @@ usage: agent-hq <command>
   bench     60 s browser benchmark with 15 fake agents (fps, p95, draw calls, heap)
   report    daily report from local logs: ~/.agent-hq/reports/YYYY-MM-DD.html (--date=YYYY-MM-DD, default today)
   soak      long run through a real server on a temp home (--minutes=60): leaks + slowdown, CSV in ~/.agent-hq
+  lan on | off   the office on your phone over home Wi-Fi (token link + QR code; read-only)
   approvals on [--lan] | off   Allow once / Deny for Claude Code permission prompts from the office (off by default)
   install   (re)install hooks, hidden autostart and the agent-hq command`;
 
@@ -213,6 +247,7 @@ usage: agent-hq <command>
     case 'soak': await require('./soak').main(); break;
     case 'report': require('./report').main(process.argv.slice(3)); break;
     case 'approvals': approvalsCmd(process.argv[3]); break;
+    case 'lan': await lanCmd(process.argv[3]); break;
     default: console.log(usage); if (cmd && cmd !== 'help' && cmd !== '--help') process.exitCode = 2;
   }
 })();

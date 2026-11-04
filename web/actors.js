@@ -325,7 +325,7 @@ export class Actors {
   // Name tags stay on top but never overlap: higher priority first (selected, waiting/stuck, working);
   // a colliding tag is nudged up, then shrunk; low-priority tags (resting, helpers) are hidden if they still collide.
   placeTags(n) {
-    const cam = this.w.camera, W = innerWidth, H = this.w.viewH || innerHeight, placed = this.placed || (this.placed = []);
+    const cam = this.w.camera, W = this.w.viewW || innerWidth, H = this.w.viewH || innerHeight, placed = this.placed || (this.placed = []);
     placed.length = 0;
     const list = this.tagSort || (this.tagSort = []); list.length = 0;
     for (let i = 0; i < n; i++) { const q = this.tagQ[i]; _v.set(q.x, q.y, q.z).project(cam); q.sx = (_v.x * .5 + .5) * W; q.sy = (-_v.y * .5 + .5) * H; list.push(q); }

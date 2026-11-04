@@ -43,7 +43,9 @@ export class UI {
     this.btnInsights = h('button', 'hbtn text', `${ICON.chart}<span>Timeline &amp; stats</span>`); this.btnInsights.onclick = () => this.openInsights('timeline');
     this.btnHome = h('button', 'hbtn', ICON.home); this.btnHome.title = 'Fit the whole office (Esc)'; this.btnHome.onclick = () => onHome();
     this.btnMute = h('button', 'hbtn'); this.btnMute.onclick = () => { this.muted = !this.muted; localStorage.setItem('hq-muted', this.muted ? '1' : '0'); this.paintMute(); this.pushMute(); this.unlockAudio(); };
-    $('hbtns').append(this.btnInsights, this.btnHome, this.btnMute); this.paintMute();
+    this.btnPhone = h('button', 'hbtn text', `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span>Phone</span>`); this.btnPhone.hidden = true; this.btnPhone.title = 'LAN mode is on: link + QR code for your phone'; this.btnPhone.onclick = () => this.openPhone();
+    $('hbtns').append(this.btnPhone, this.btnInsights, this.btnHome, this.btnMute); this.paintMute();
+    $('phone').addEventListener('click', e => { if (e.target.id === 'phone' || e.target.closest('.m-close')) $('phone').classList.remove('show'); });
     // bottom: time of day + quality
     const tod = $('tod');
     for (const [k, l] of [['now', 'Now'], ['day', 'Day'], ['evening', 'Evening'], ['night', 'Night']]) {
@@ -95,6 +97,9 @@ export class UI {
       if (ring) this.chime(ring);
     }
     document.title = s.counts.waiting ? `(${s.counts.waiting}) Agent HQ` : 'Agent HQ';
+    const v = s.viewer || this.viewer || { lan: false, canControl: true, canApprove: true }; this.viewer = v;
+    document.body.classList.toggle('viewer-lan', !!v.lan); document.body.classList.toggle('can-approve', !!v.canApprove);
+    if (!v.lan && !this.bench && Date.now() - (this.lanAt || 0) > 30000) { this.lanAt = Date.now(); fetch('/api/lan').then(r => r.json()).then(l => { this.lan = l; this.btnPhone.hidden = !(l.enabled && l.url); }).catch(() => {}); }
     // KPIs
     setText(this.kpi.working.val, s.counts.working); setText(this.kpi.working.sub, `${s.bots.reduce((a, b) => a + b.robots.filter(r => r.status === 'running').length, 0)} running a command`);
     setText(this.kpi.waiting.val, s.counts.waiting); setText(this.kpi.waiting.sub, s.waiting[0] ? `${s.waiting[0].label} · ${ago(s.waiting[0].since)}` : 'nobody needs you');
@@ -313,6 +318,17 @@ export class UI {
     body.querySelector('#rpDate').onchange = e => { if (e.target.value) this.loadReport(e.target.value); };
     body.querySelector('#rpFresh').onclick = () => this.loadReport(day, true);
     for (const a of body.querySelectorAll('[data-day]')) a.onclick = e => { e.preventDefault(); this.loadReport(a.dataset.day); };
+  }
+  async openPhone() {   // link + QR code (drawn from the server's matrix, no libraries)
+    const m = $('phone'); let l = null; try { l = await (await fetch('/api/lan')).json(); } catch (e) {}
+    m.innerHTML = `<div class="modal-card phone-card"><div class="m-head"><b>Office on your phone</b><button class="hbtn m-close" aria-label="Close">✕</button></div><div class="m-body">${!l || !l.url ? '<div class="empty">LAN mode is off. Run <code>agent-hq lan on</code>.</div>' :
+      `<canvas id="qrc" width="296" height="296"></canvas><p>Scan with the phone camera (same Wi-Fi), or open:</p><p class="mono">${esc(l.url)}</p>
+      <p class="muted">${l.listening ? 'Listening on ' + esc(l.ip) : 'Not listening: ' + esc(l.error || '?')} · read-only${l.approvals ? ' · Allow once / Deny allowed from the phone' : ''}. The link holds a secret token: share it only with yourself. <code>agent-hq lan off</code> invalidates it.</p>`}</div></div>`;
+    m.classList.add('show');
+    const c = m.querySelector('#qrc'); if (!c || !l.qr) return;
+    const g = c.getContext('2d'), n = l.qr.length, q = 3, s = Math.floor(c.width / (n + 2 * q)), off = Math.floor((c.width - s * (n + 2 * q)) / 2);
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.fillStyle = '#000';
+    l.qr.forEach((row, y) => { for (let x = 0; x < n; x++) if (row[x] === '1') g.fillRect(off + (x + q) * s, off + (y + q) * s, s, s); });
   }
   async loadStats() {
     let d; try { d = this.bench ? { days: [], busiestToday: null } : await (await fetch('/stats')).json(); } catch (e) { return; }

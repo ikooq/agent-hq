@@ -21,7 +21,10 @@ world.renderer.domElement.addEventListener('pointermove', e => { if (e.buttons |
 window.__hq = { world, actors, ui, get state() { return state; }, apply: (s, prev) => { const p = state; state = s; apply(s, prev || p); } };
 
 let state = null, layoutSig = '';
+const MOBILE = params.has('m') || matchMedia('(max-width: 760px)').matches;
+if (MOBILE) { document.documentElement.classList.add('mobile'); document.body.classList.add('mobile'); world.setQualityMode('low'); world.resize(); }
 function insets() {
+  if (document.body.classList.contains('mobile')) { world.setInsets({ left: 6, right: 6, top: 6, bottom: 6 }); return; }
   const right = document.getElementById('side').getBoundingClientRect();
   world.setInsets({ left: 16, right: innerWidth - right.left + 8, top: document.querySelector('header').getBoundingClientRect().bottom + 6, bottom: innerHeight - document.querySelector('footer').getBoundingClientRect().top + 6 });
 }

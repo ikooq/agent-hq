@@ -12,6 +12,7 @@ const { spawn } = require('child_process');
 const { createEngine } = require('./core');
 const { createGitWatcher } = require('./git');
 const { ensureSecret, sameSecret, createApprovals } = require('./approvals');
+const { pickLanIp } = require('./lan');
 
 const HQ = path.join(os.homedir(), '.agent-hq');
 const HOST = '127.0.0.1';
@@ -33,6 +34,7 @@ function reloadSettings() {
   let next = null; try { next = JSON.parse(fs.readFileSync(SETTINGS, 'utf8')); } catch (e) { return; }
   const wasOn = approvalsOn(); settings = { muted: false, ...next };
   if (wasOn && !approvalsOn()) approvals.cancelAll('approvals-off');
+  syncLan();
   scheduleTick('settings', 0);
 }
 const approvalsOn = () => !!(settings.approvals && settings.approvals.enabled);
@@ -244,12 +246,61 @@ function reportCatchUp() {
 
 const cpu0 = { t: Date.now(), u: process.cpuUsage() };
 
-const server = http.createServer((req, res) => {
-  const host = String(req.headers.host || '').replace(/:\d+$/, '');
-  if (!['127.0.0.1', 'localhost'].includes(host)) return send(res, 403, { error: 'forbidden host' });
-  const url = req.url.split('?')[0];
+// ---------- LAN mode (opt-in, `agent-hq lan on`): a second listener on the home-network IP ----------
+// Every LAN request needs the random token (first visit: ?t=TOKEN, then an HttpOnly SameSite=Strict cookie).
+// The phone is read-only; it may only Allow once / Deny when `agent-hq approvals on --lan` is set.
+const lanCfg = () => settings.lan || {};
+const lanApprovals = () => approvalsOn() && !!(settings.approvals && settings.approvals.lan);
+let lanServer = null, lanState = { enabled: false, ip: null, listening: false, error: null };
+function syncLan() {
+  const want = !!lanCfg().enabled && !!lanCfg().token, ip = want ? pickLanIp(lanCfg().ip) : null;
+  if (lanServer && (!want || lanState.ip !== ip)) { const s = lanServer; lanServer = null; s.close(); try { s.closeAllConnections(); } catch (e) {} log('LAN listener closed'); }
+  lanState = { enabled: want, ip, listening: !!lanServer, error: want && !ip ? 'no private IPv4 address found (are you on Wi-Fi?)' : null };
+  if (!want || !ip || lanServer) return;
+  const s = http.createServer((req, res) => handle(req, res, true));
+  s.on('error', e => { lanState.error = e.code || String(e.message); lanState.listening = false; log('LAN listener error', e.code || e.message); if (lanServer === s) lanServer = null; });
+  s.listen(PORT, ip, () => { lanState.listening = true; log(`LAN mode: http://${ip}:${PORT}/ (token required)`); });
+  lanServer = s;
+}
+const cookieOf = (req, k) => { const m = new RegExp('(?:^|;\\s*)' + k + '=([^;]+)').exec(req.headers.cookie || ''); return m ? m[1] : null; };
+const LAN_DENIED = '<!DOCTYPE html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Agent HQ</title><body style="font:16px system-ui;padding:24px;background:#faf7f2;color:#3a3346"><h2>Agent HQ</h2><p>This link needs the token. On the computer, run <code>agent-hq lan on</code> and scan the QR code again.</p>';
+function lanGate(req, res, url) {   // true = handled (refused or redirected)
+  const host = String(req.headers.host || '');
+  if (!lanState.ip || host !== `${lanState.ip}:${PORT}`) { send(res, 403, { error: 'forbidden host' }); return true; }
+  const token = lanCfg().token, t = new URLSearchParams(req.url.split('?')[1] || '').get('t');
+  if (t && sameSecret(t, token)) {   // first visit from the QR link: keep the token in a cookie, drop it from the address bar
+    res.writeHead(302, { ...SEC, Location: '/?m=1', 'Set-Cookie': `hq_lan=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` }); res.end(); return true;
+  }
+  if (!sameSecret(cookieOf(req, 'hq_lan'), token)) { send(res, 401, LAN_DENIED, 'text/html; charset=utf-8'); return true; }
+  const lanOrigin = `http://${lanState.ip}:${PORT}`;
+  if (req.method === 'POST') {
+    if (url !== '/api/approvals/decide' || !lanApprovals()) { send(res, 403, { error: 'read-only on the phone' }); return true; }
+    if (req.headers.origin !== lanOrigin || !/^application\/json/.test(req.headers['content-type'] || '')) { send(res, 403, { error: 'forbidden origin' }); return true; }
+    readBody(req, body => {
+      if (!body) return send(res, 400, { error: 'bad json' });
+      if (!sameSecret(req.headers['x-hq-secret'], SECRET)) return send(res, 403, { error: 'bad secret' });
+      const r = approvals.decide(body.id, body.decision, 'phone'); send(res, r.code, r.body);
+    });
+    return true;
+  }
+  if (/^\/api\/(health|settings|toasts|lan)$/.test(url) || (url === '/api/approvals/token' && !lanApprovals())) { send(res, 403, { error: 'not on the phone' }); return true; }
+  return false;
+}
+function lanInfo() {
+  const c = lanCfg(), url = lanState.ip && c.token ? `http://${lanState.ip}:${PORT}/?t=${c.token}` : null;
+  let qr = null; try { if (url) qr = require('./qr').qrMatrix(url).map(r => r.map(x => (x ? 1 : 0)).join('')); } catch (e) {}
+  return { ...lanState, url, qr, approvals: lanApprovals() };
+}
 
-  if (req.method === 'POST' && url === '/api/approvals/request') {   // from hook.js: secret required, never from a browser page
+function handle(req, res, lan) {
+  const url = req.url.split('?')[0];
+  if (lan) { if (lanGate(req, res, url)) return; }
+  else {
+    const host = String(req.headers.host || '').replace(/:\d+$/, '');
+    if (!['127.0.0.1', 'localhost'].includes(host)) return send(res, 403, { error: 'forbidden host' });
+  }
+
+  if (req.method === 'POST' && url === '/api/approvals/request' && !lan) {   // from hook.js: secret required, never from a browser page
     if (req.headers.origin || !sameSecret(req.headers['x-hq-secret'], SECRET) || !/^application\/json/.test(req.headers['content-type'] || '')) return send(res, 403, { error: 'forbidden' });
     return readBody(req, body => {
       if (!body) return send(res, 400, { error: 'bad json' });
@@ -282,7 +333,8 @@ const server = http.createServer((req, res) => {
       req.on('close', () => clients.delete(res));
       return;
     }
-    if (url === '/state') { if (!state) tick('first'); return send(res, 200, { ...state, seq, muted: settings.muted }); }
+    if (url === '/state') { if (!state) tick('first'); return send(res, 200, { ...state, seq, muted: settings.muted, viewer: { lan, canControl: !lan, canApprove: lan ? lanApprovals() : approvalsOn() } }); }
+    if (url === '/api/lan') return send(res, 200, lanInfo());
     if (url === '/timeline') return send(res, 200, engine.timeline());
     if (url === '/stats') return send(res, 200, engine.stats(7));
     if (url === '/api/health') {
@@ -311,7 +363,8 @@ const server = http.createServer((req, res) => {
   if (!file) { const m = /^\/web\/([\w.-]+\.(?:js|css))$/.exec(url); if (m) file = path.join(__dirname, 'web', m[1]); }
   if (!file) return send(res, 404, { error: 'not found' });
   fs.readFile(file, (err, data) => err ? send(res, 404, { error: 'not found' }) : send(res, 200, data, TYPES[path.extname(file)] || 'application/octet-stream', { 'Cache-Control': 'no-cache' }));
-});
+}
+const server = http.createServer((req, res) => handle(req, res, false));
 
 function cleanup() { try { if (+fs.readFileSync(PID_FILE, 'utf8') === process.pid) fs.unlinkSync(PID_FILE); } catch (e) {} }
 server.on('error', e => {
@@ -326,6 +379,7 @@ server.listen(PORT, HOST, () => {
   tick('start');
   setupWatchers();
   git.start();
+  syncLan();
   if (!process.env.AGENT_HQ_NO_AUTOREPORT) { setTimeout(reportCatchUp, 30000); setInterval(reportClock, 60000); }
   setInterval(() => scheduleTick('heartbeat', 0), 5000);                        // time-based rules (stuck, idle Codex)
   setInterval(upkeep, 60000);                                                   // today's stats file, pruning, compaction
