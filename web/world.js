@@ -198,6 +198,7 @@ export class World {
       screens: new Atlas(this.renderer, 2048, 1024, 256, 160),   // 48 desks
       tags: new Atlas(this.renderer, 1024, 1024, 256, 64),
       chips: new Atlas(this.renderer, 1024, 1024, 256, 88),
+      tasks: new Atlas(this.renderer, 2048, 1024, 512, 64),      // task cards above working robots
     };
     this.icons = this.iconAtlas();
     this.quality = { mode: localStorage.getItem('hq-quality') || 'auto', level: 0, belowSince: 0, aboveSince: 0, changedAt: -1e9, holdUntil: 0 };

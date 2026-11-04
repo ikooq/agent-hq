@@ -64,7 +64,7 @@ asst('nx1', 60, 'n1', [toolUse('tn', 'Bash', { command: 'rm -rf build' })], { in
 ev(59, 'Notification', 'nx1', 'proj/nexus', { notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' });
 // J second robot (Nexus #2): working
 ev(100, 'SessionStart', 'nx2', 'proj/nexus'); ev(30, 'UserPromptSubmit', 'nx2', 'proj/nexus');
-user('nx2', 30, 'style the header'); asst('nx2', 10, 'n2', [{ type: 'text', text: 'Styling' }], { input_tokens: 1, output_tokens: 2 });
+user('nx2', 30, [{ type: 'text', text: '<system-reminder>ignore me</system-reminder>' }, { type: 'text', text: 'Style the header and make the logo bigger on mobile please\nsecond line' }]); asst('nx2', 10, 'n2', [{ type: 'text', text: 'Styling' }], { input_tokens: 1, output_tokens: 2 });
 // D waiting cleared by a newer transcript line (Scratch #1)
 ev(200, 'SessionStart', 'sc1', 'proj/scratch'); ev(90, 'UserPromptSubmit', 'sc1', 'proj/scratch');
 asst('sc1', 60, 's1', [toolUse('ts', 'Read', { file_path: 'C:/a/roster.json' })], { input_tokens: 1, output_tokens: 1 });
@@ -136,6 +136,8 @@ check('totals = sum of bots', S.totals.total === S.bots.reduce((a, b) => a + b.t
 const res = bot('researcher');
 check('subagent: helper robot next to the parent (LocQA)', robot('locqa').helpers.length === 1 && robot('locqa').helpers[0].type === 'researcher');
 check('subagent: robot at its own desk + tokens count there', res.robots.length === 1 && res.robots[0].status === 'running' && res.tokens.in === 100 && res.tokens.out === 50, JSON.stringify(res.tokens));
+check('task card: first line of the last prompt ("fix the tests")', robot('locqa').task === 'fix the tests', JSON.stringify(robot('locqa').task));
+check('task card: system text ("<...") skipped, clipped to ~40 chars', robot('nexus', 1).task === 'Style the header and make the logo bigg…', JSON.stringify(robot('nexus', 1).task));
 check('last actions parsed ("Edit server.js")', robot('locqa').actions.some(a => a.text === 'Edit server.js'));
 check('malformed lines skipped, missing transcript survives', E._internals.sessions.has('nofile') && robot('tutor', 1) && robot('tutor', 1).status === 'resting');
 check('rotation: legacy events.jsonl migrated into events-YYYY-MM.jsonl', !fs.existsSync(path.join(HQ, 'events.jsonl')) && fs.existsSync(path.join(HQ, 'events.v1-migrated.jsonl')) && E._internals.sessions.has('hq1'));
@@ -267,6 +269,7 @@ check('codex: model chip "OpenAI · gpt-6.1-sol", unpriced', cb('cw').modelLabel
 check('codex: matched by folder + source (same folder as a Claude bot stays Codex)', cb('csh').robots.length === 1 && cb('cl').robots.length === 0);
 check('codex: unlisted folder becomes a Codex drop-in in the Codex lab', SC.bots.some(b => b.dropIn && b.source === 'codex' && b.team === 'Codex' && b.robots.length === 1));
 check('codex: task_complete lands in "finished today"', SC.finished.some(f => f.botId === 'cs' && f.summary === 'hi'));
+check('codex: task card from the last user message ("say hi")', cb('cs').robots[0].task === 'say hi', JSON.stringify(cb('cs').robots[0].task));
 check('codex: last actions parsed ("Shell: npm test")', cb('cs').robots[0].actions.some(a => a.text === 'Shell: npm test'));
 check('codex: ~/.codex is never written', snapshot(path.join(CX, '.codex')) === before);
 EC.close(); fs.rmSync(CX, { recursive: true, force: true });

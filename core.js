@@ -11,6 +11,14 @@ const monthKey = t => { const d = new Date(t); return `${d.getFullYear()}-${pad(
 const startOfDay = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
 const ms = v => (v ? (typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : (Date.parse(v) || 0)) : 0);
 const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+// First real line of a prompt ("Fix login bug"): skips system/tool text (lines starting with "<") and interruption markers.
+function taskLine(txt) {
+  txt = String(txt || '');
+  const req = /## My request for Codex:\s*/.exec(txt); if (req) txt = txt.slice(req.index + req[0].length);   // Codex IDE context block
+  else if (/^\s*# (Files mentioned by the user|Context from my IDE)/.test(txt)) return null;
+  for (const l of txt.split(/\r?\n/)) { const x = l.trim(); if (!x || x.startsWith('<') || /^\[Request interrupted/.test(x) || /^Caveat: /.test(x)) continue; return clip(x, 40); }
+  return null;
+}
 const RANK = { waiting: 6, stuck: 5, running: 4, working: 3, resting: 2, off: 1 };
 
 function modelLabel(m, source) {
@@ -212,13 +220,13 @@ function createEngine(opts = {}) {
   function newSession(id, e, source = 'claude') {
     return { id, source, cwd: e.cwd || '', transcript: null, first: ms(e.time) || now(), starts: [], prompts: [], rests: [], perms: [], ends: [],
       allEv: [], permMsgs: [], tx: { offset: 0, rest: '' }, usage: new Map(), usageDays: new Map(), lines: [], pend: [], pending: new Map(),
-      lastLine: 0, model: null, modelTime: 0, actions: [], texts: [], step: '', subIds: new Set(),
+      lastLine: 0, model: null, modelTime: 0, actions: [], texts: [], step: '', task: null, subIds: new Set(),
       restOffMs: source === 'codex' ? CODEX_REST_OFF_MS : 0 };
   }
   function newSub(e) {
     return { id: e.agent_id, type: e.agent_type || 'agent', parent: e.session_id, start: ms(e.time), stop: 0, transcript: e.agent_transcript_path || null,
       tx: { offset: 0, rest: '' }, usage: new Map(), usageDays: new Map(), lines: [], pend: [], pending: new Map(), lastLine: 0, model: null, modelTime: 0,
-      actions: [], texts: [], step: '', first: ms(e.time), permMsgs: [] };
+      actions: [], texts: [], step: '', task: null, first: ms(e.time), permMsgs: [] };
   }
 
   function applyEvent(e) {
@@ -315,6 +323,7 @@ function createEngine(opts = {}) {
           s.pending.clear();
           const txt = typeof m.content === 'string' ? m.content : (content.find(c => c.type === 'text') || {}).text || '';
           if (!txt.startsWith('<')) s.step = 'Reading prompt: ' + clip(txt, 70);
+          if (!j.isCompactSummary) for (const p of typeof m.content === 'string' ? [m.content] : content.filter(c => c.type === 'text').map(c => c.text)) { const task = taskLine(p); if (task) { s.task = task; break; } }
         } else if (results.length && !s.pending.size) s.step = 'Thinking…';
       }
       pushLine(s, t);
@@ -420,9 +429,9 @@ function createEngine(opts = {}) {
         } else if (/_output$/.test(ty)) {
           s.pending.delete(p.call_id);
         } else if (ty === 'message') {
-          const txt = (Array.isArray(p.content) ? p.content : []).map(c => c.text || '').join(' ').trim();
+          const parts = Array.isArray(p.content) ? p.content : [], txt = parts.map(c => c.text || '').join(' ').trim();
           if (p.role === 'assistant' && txt) pushText(s, t, txt);
-          else if (p.role === 'user' && txt && !txt.startsWith('<')) s.step = 'Reading prompt: ' + clip(txt, 70);
+          else if (p.role === 'user' && txt && !txt.startsWith('<')) { s.step = 'Reading prompt: ' + clip(txt, 70); for (const c of parts) { const task = taskLine(c.text); if (task) { s.task = task; break; } } }
           else if (p.role !== 'assistant') return;     // developer/system context: not activity
         }
         pushLine(s, t);
@@ -583,7 +592,7 @@ function createEngine(opts = {}) {
         return {
           key: r.kind + ':' + x.id, kind: r.kind, id: x.id, source: b.source, label: i ? `${b.name} #${i + 1}` : b.name, status: st,
           statusSince: statusSinceCached(fn, x, t, st), runningSince: st === 'running' && pend ? pend.t : null,
-          step: clip(step, 120), waitingMsg, start: x.first, lastLine: x.lastLine || null,
+          step: clip(step, 120), task: x.task || null, waitingMsg, start: x.first, lastLine: x.lastLine || null,
           model, modelLabel: modelLabel(model, b.source), cwd: r.kind === 'session' ? x.cwd : null,
           agentType: r.kind === 'subagent' ? x.type : null, tokens: rt, helpers,
           turn: r.kind === 'session' ? turnOf(x, t) : null,
@@ -877,4 +886,4 @@ function createEngine(opts = {}) {
   };
 }
 
-module.exports = { createEngine, actionLabel, codexActionLabel, modelLabel, dayKey, monthKey };
+module.exports = { createEngine, taskLine, actionLabel, codexActionLabel, modelLabel, dayKey, monthKey };

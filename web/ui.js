@@ -159,7 +159,7 @@ export class UI {
     const t = this.target(), host = $('pipeline');
     if (!t || !t.r || !t.r.turn) { setText($('pipeTitle'), t ? `${t.b.name}: no task right now` : 'Select an agent to see its task'); for (const el of host.querySelectorAll('.stage')) { el.className = 'stage'; setText(el.querySelector('em'), '—'); } return; }
     const { r, b } = t, tn = r.turn;
-    setText($('pipeTitle'), `${r.label}${this.selected ? '' : ' (latest)'} · ${r.step}`);
+    setText($('pipeTitle'), `${r.label}${this.selected ? '' : ' (latest)'}${r.task ? ` · “${r.task}”` : ''} · ${r.step}`);
     const stages = [['requested', tn.requested], ['working', tn.working], ['approval', tn.approval], ['done', tn.done]];
     const cur = tn.done ? 'done' : r.status === 'waiting' ? 'approval' : tn.working ? 'working' : 'requested';
     for (const [k, time] of stages) {
@@ -173,7 +173,7 @@ export class UI {
     const t = this.target(); if (!t || !this.selected) return;
     const { b, r } = t; const st = r ? r.status : 'off';
     const tok = r ? r.tokens : b.tokens; const scope = r && b.robots.length > 1 ? 'this session' : 'whole bot';
-    const key = JSON.stringify([b.id, r && r.key, st, r && r.step, tok, r && r.actions && r.actions.length && r.actions[0].t, r && r.helpers]);
+    const key = JSON.stringify([b.id, r && r.key, st, r && r.step, r && r.task, tok, r && r.actions && r.actions.length && r.actions[0].t, r && r.helpers]);
     if (key === this.cardKey && Date.now() - (this.cardAt || 0) < 15000) return;
     this.cardKey = key; this.cardAt = Date.now();
     this.card.innerHTML = `
@@ -182,6 +182,7 @@ export class UI {
         <button class="hbtn bc-close" aria-label="Close">✕</button></div>
       <div class="bc-body">
         <p class="bc-job">${esc(b.job || '—')}</p>
+        ${r && r.task ? `<div class="bc-task"><span>Task</span>${esc(r.task)}</div>` : ''}
         ${r ? `<div class="bc-step">${st === 'running' && r.runningSince ? `<b>${dur(Date.now() - r.runningSince)}</b> · ` : ''}${esc(r.step)}</div>` : '<div class="bc-step muted">No live session. The desk is empty.</div>'}
         <dl class="bc-grid"><dt>Team</dt><dd>${esc(b.team)}${b.source === 'codex' ? ' · Codex' : ' · Claude Code'}</dd>
           <dt>Model</dt><dd>${esc(r ? r.modelLabel : b.modelLabel)}</dd>

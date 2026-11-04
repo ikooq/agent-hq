@@ -69,7 +69,9 @@ export class Actors {
     this.icons = new Billboards(billboardMaterial(world.icons.tex), CAP, 21);
     this.glow = new Billboards(billboardMaterial(world.icons.tex, { additive: true, depthTest: true }), CAP, 15);
     this.cards = new Billboards(billboardMaterial(world.icons.tex, { depthTest: true }), CAP, 16);
-    for (const b of [this.tags, this.icons, this.glow, this.cards]) G.add(b.mesh);
+    this.taskBB = new Billboards(billboardMaterial(world.atlases.tasks.tex), CAP, 20);
+    for (const b of [this.tags, this.icons, this.glow, this.cards, this.taskBB]) G.add(b.mesh);
+    this.taskSlots = new Map();
     this.tagSlots = new Map(); this.chipSlots = new Map(); this.tagQ = [];
   }
 
@@ -215,7 +217,7 @@ export class Actors {
   // ---------- rendering ----------
   render(t, now) {
     const w = this.w, px = w.pxScale(), m = this.m;
-    for (const b of [this.tags, this.icons, this.glow, this.cards]) { b.begin(); b.mesh.material.uniforms.pxScale.value = px; }
+    for (const b of [this.tags, this.icons, this.glow, this.cards, this.taskBB]) { b.begin(); b.mesh.material.uniforms.pxScale.value = px; }
     this.glow.mesh.material.uniforms.pxScale.value = 1; this.cards.mesh.material.uniforms.pxScale.value = 1;
     let n = 0, ln = 0;
     for (const a of this.agents.values()) {
@@ -273,6 +275,10 @@ export class Actors {
       const icon = a.tasks && a.tasks.length && !a.moving && a.arrived ? a.tasks[0].icon : st === 'stuck' ? 'bang' : st === 'waiting' && !a.moving ? 'q' : st === 'resting' && !a.moving ? 'zzz' : st === 'running' && !a.moving ? 'spin' + (Math.floor(t * 8) % 4) : null;
       if (icon && !this.w.icons.rects[icon] && !this.warnedIcon) { this.warnedIcon = true; console.warn('icon without rect: ' + icon + ' agent ' + a.key + ' status ' + st); }
       if (icon && a.kind !== 'lead') q.icon = this.w.icons.rects[icon];
+      // task card: first line of the last prompt, above robots that are on a task
+      q.task = null;
+      const task = a.kind === 'robot' && a.r && a.r.task && (st === 'working' || st === 'running' || st === 'stuck' || st === 'waiting') ? a.r.task : null;
+      if (task) { if (a.taskKey !== task || !a.taskRect) this.refreshTask(a, task); q.task = a.taskRect; q.taskW = a.taskW; }
       // glows (off in Low quality)
       if (this.w.glowOn) {
         if (st === 'waiting' && a.kind !== 'helper') this.glow.push(a.pos.x, .6 + rigY, a.pos.z, 1.8, 1.8, this.w.icons.rects.glow, 1, 1, 1, .55 + .25 * Math.sin(t * 4));
@@ -305,7 +311,7 @@ export class Actors {
     const br = this.w.boardRect;
     if (br) this.boardCards.forEach((c, i) => { const col = i % 6, row = Math.floor(i / 6); this.cards.push(br.x0 + .14 + col * .27, br.y1 - .14 - row * .24, br.z + .02, .22, .22, this.w.icons.rects.card, c.color.r * .6 + .4, c.color.g * .6 + .4, c.color.b * .6 + .4, 1); });
     if (this.desksDirty || now - (this.desksAt || 0) > 1000) { this.desksDirty = false; this.desksAt = now; this.refreshDesks(); }
-    for (const b of [this.tags, this.icons, this.glow, this.cards]) b.end();
+    for (const b of [this.tags, this.icons, this.glow, this.cards, this.taskBB]) b.end();
   }
   // Name tags stay on top but never overlap: higher priority first (selected, waiting/stuck, working);
   // a colliding tag is nudged up, then shrunk; low-priority tags (resting, helpers) are hidden if they still collide.
@@ -325,6 +331,10 @@ export class Actors {
       placed.push(q.sx, q.sy - oy, 132 * s, 34 * s);
       this.tags.push(q.x, q.y, q.z, 128 * s, 32 * s, a.tagRect, 1, 1, 1, a.appear, 0, oy);
       if (q.icon) { placed.push(q.sx, q.sy - oy - 34 * s, 36 * s, 36 * s); this.icons.push(q.x, q.y, q.z, 34 * s, 34 * s, q.icon, 1, 1, 1, 1, 0, oy + 34 * s); }
+      if (q.task && q.pri >= 7) {   // only robots on a task; hidden when it would cover another tag
+        const ty = oy + (q.icon ? 70 : 34) * s, tw = (q.taskW || 200) * s;
+        if (!hit(q.sx, q.sy - ty, tw, 28 * s) || q.pri === 9) { placed.push(q.sx, q.sy - ty, tw, 28 * s); this.taskBB.push(q.x, q.y, q.z, 256 * s, 32 * s, q.task, 1, 1, 1, a.appear, 0, ty); }
+      }
     }
   }
   refreshTag(a) {   // repaint this agent's name tag (only when label / status / selection changed)
@@ -339,9 +349,23 @@ export class Actors {
       g.fillStyle = sel ? '#fff' : '#3a3346'; g.textBaseline = 'middle'; g.fillText(label, x0 + 38, H / 2 + 1, W - 54);
     });
   }
+  refreshTask(a, task) {   // paper task card with the prompt's first line (slot redrawn only when the text changes)
+    const atlas = this.w.atlases.tasks, slot = this.slotFor(this.taskSlots, a.key, atlas);
+    a.taskKey = task; a.taskRect = slot < 0 ? null : atlas.rect(slot);
+    if (slot < 0) return;
+    atlas.draw(slot, task, (g, W, H) => {
+      g.font = '600 25px Segoe UI, sans-serif'; const tw = Math.min(W - 60, g.measureText(task).width), pw = tw + 50, x0 = (W - pw) / 2;
+      a.taskW = pw / 2 + 4;
+      g.shadowColor = 'rgba(40,30,50,.25)'; g.shadowBlur = 6; g.shadowOffsetY = 2;
+      rr(g, x0, 8, pw, H - 16, 8); g.fillStyle = '#fffaf0'; g.fill(); g.shadowColor = 'transparent';
+      g.fillStyle = '#e8b04a'; g.fillRect(x0 + 12, 16, 5, H - 32);            // tape strip
+      g.fillStyle = '#4a4058'; g.textBaseline = 'middle'; g.fillText(task, x0 + 30, H / 2 + 1, W - 60);
+    });
+  }
   slotFor(map, key, atlas) { let s = map.get(key); if (s == null || s < 0) { s = atlas.alloc(); map.set(key, s); } return s; }
   gcSlots() {   // every 5 s: give back atlas slots of agents that left and bots that are gone
     for (const [k, s] of this.tagSlots) if (!this.agents.has(k)) { this.w.atlases.tags.release(s); this.tagSlots.delete(k); }
+    for (const [k, s] of this.taskSlots) if (!this.agents.has(k)) { this.w.atlases.tasks.release(s); this.taskSlots.delete(k); }
     const bots = new Set(this.state ? this.state.bots.map(b => b.id) : []);
     for (const [id, s] of this.chipSlots) if (!bots.has(id)) { this.w.atlases.chips.release(s); this.chipSlots.delete(id); }
   }
