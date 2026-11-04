@@ -6,7 +6,8 @@ A live 3D office for Claude Code and Codex agents. Everything runs locally on `1
 - `core.js`: reads hook events, Claude transcripts and Codex logs (read-only) into office state
 - `server.js`: HTTP server with `/state`, the `/events` SSE stream, timeline and stats
 - `web/`: the Three.js office (Three.js r160 is vendored in `vendor/`)
-- `cli.js`: `agent-hq start | stop | restart | status | test | bench | open`
+- `cli.js`: `agent-hq start | stop | restart | status | test | bench | soak | open`
+- `soak.js`: `agent-hq soak --minutes=60` drives a busy fake day through a real server on a temp home and logs page + server numbers per minute to `~/.agent-hq/soak-*.csv` (`--no-page`: server only)
 - `roster.json`: bots, teams and folders; `prices.json`: model prices for cost estimates
 - `claude/`: copies of the Claude Code agents (`~/.claude/agents`) and the hooks block for `~/.claude/settings.json`
 

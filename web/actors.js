@@ -329,7 +329,8 @@ export class Actors {
   }
   refreshTag(a) {   // repaint this agent's name tag (only when label / status / selection changed)
     const atlas = this.w.atlases.tags, slot = this.slotFor(this.tagSlots, a.key, atlas), sel = this.selected === a.key, st = a.status, label = a.label || '';
-    a.tagKey = label + st + sel; a.tagRect = atlas.rect(slot);
+    a.tagKey = label + st + sel; a.tagRect = slot < 0 ? null : atlas.rect(slot);
+    if (slot < 0) return;                                  // atlas full (more agents than CAP): no tag rather than a shared slot
     atlas.draw(slot, a.tagKey, (g, W, H) => {
       g.font = `${a.kind === 'helper' ? 600 : 700} 30px Segoe UI, sans-serif`; const tw = Math.min(W - 54, g.measureText(label).width);
       const pw = tw + 52, x0 = (W - pw) / 2; rr(g, x0, 6, pw, H - 12, 24); g.fillStyle = sel ? 'rgba(58,51,70,.94)' : 'rgba(255,252,247,.94)'; g.fill();
@@ -338,9 +339,11 @@ export class Actors {
       g.fillStyle = sel ? '#fff' : '#3a3346'; g.textBaseline = 'middle'; g.fillText(label, x0 + 38, H / 2 + 1, W - 54);
     });
   }
-  slotFor(map, key, atlas) { let s = map.get(key); if (s == null) { s = atlas.alloc(); map.set(key, s); } return s; }
-  gcSlots() {
+  slotFor(map, key, atlas) { let s = map.get(key); if (s == null || s < 0) { s = atlas.alloc(); map.set(key, s); } return s; }
+  gcSlots() {   // every 5 s: give back atlas slots of agents that left and bots that are gone
     for (const [k, s] of this.tagSlots) if (!this.agents.has(k)) { this.w.atlases.tags.release(s); this.tagSlots.delete(k); }
+    const bots = new Set(this.state ? this.state.bots.map(b => b.id) : []);
+    for (const [id, s] of this.chipSlots) if (!bots.has(id)) { this.w.atlases.chips.release(s); this.chipSlots.delete(id); }
   }
 
   // desk monitors (atlas) + model chips
@@ -354,14 +357,14 @@ export class Actors {
       const atDesk = a && !a.moving && a.goalKey && a.goalKey.startsWith('desk');
       const sts = !r ? 'off' : r.status;
       const timer = r && r.status === 'running' && r.runningSince ? Math.floor((Date.now() - r.runningSince) / 1000) : null;
-      if (S.slots[i] == null) S.slots[i] = this.w.atlases.screens.alloc();
-      const slot = S.slots[i];
+      if (S.slots[i] == null || S.slots[i] < 0) S.slots[i] = this.w.atlases.screens.alloc();
+      const slot = S.slots[i]; if (slot < 0) return;
       const key = `${sts}|${r ? r.step : ''}|${timer}|${atDesk}`;
       this.w.atlases.screens.draw(slot, key, (g, W, H) => this.paintScreen(g, W, H, b, r, sts, timer, atDesk));
       S.rect.array.set(this.w.atlases.screens.rect(slot), i * 4);
       // chip: model + tokens today (whole bot) on the first desk of each bot
       if (d.index === 0) {
-        const cs = this.slotFor(this.chipSlots, d.botId, this.w.atlases.chips);
+        const cs = this.slotFor(this.chipSlots, d.botId, this.w.atlases.chips); if (cs < 0) return;
         const label = b.modelLabel, tok = b.tokens.total;
         this.w.atlases.chips.draw(cs, `${label}|${fmtTok(tok)}|${b.team}|${Math.round(100 * tok / (this.maxTok || 1))}`, (g, W, H) => {
           const col = '#' + new THREE.Color(b.source === 'codex' ? 0x2fa39d : (TEAM_HEX[b.team] ?? 0x9a94a6)).getHexString();

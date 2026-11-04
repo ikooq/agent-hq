@@ -9,6 +9,7 @@ import { UI } from '/web/ui.js';
 
 const params = new URLSearchParams(location.search);
 const BENCH = params.has('bench');
+const SOAK = params.has('soak');          // `agent-hq soak`: render every frame (like bench) but with live server data
 const perf = new Perf();
 const world = new World(document.getElementById('scene'), { perf, bench: BENCH, onPick: ndc => { const a = actors.pick(ndc); if (a && a.r) select(a.r.key, a.botId); else if (a && a.kind === 'helper' && a.parent) select(a.parent.r.key, a.parent.botId); } });
 const actors = new Actors(world);
@@ -39,7 +40,7 @@ function apply(s, prev) {
     const c = new THREE.Color();
     L.desks.forEach((d, i) => { const b = s.bots.find(x => x.id === d.botId); world.rugs.setColorAt(i, b ? c.copy(botColor(b, d.index)).lerp(new THREE.Color(0xffffff), .25) : c.set(0xdddddd)); });
     world.rugs.instanceColor.needsUpdate = true;
-    perf.lastBuildMs = performance.now() - t0;
+    perf.lastBuildMs = performance.now() - t0; soak.rebuilds++;
   }
   actors.sync(s);
   ui.update(s, prev);
@@ -50,9 +51,15 @@ addEventListener('keydown', e => { if (e.key === 'Escape') { if (ui.modal.classL
 
 // ---------- data: first load via /state, then Server-Sent Events with only the changes ----------
 const conn = document.getElementById('conn');
-async function loadState() {
-  const r = await fetch('/state', { cache: 'no-store' }); const s = await r.json();
-  const prev = state; state = s; apply(s, prev);
+// one /state request at a time: a reconnect or a burst of out-of-order patches must not stack reloads
+let loading = null;
+function loadState() {
+  if (loading) return loading;
+  loading = (async () => {
+    const r = await fetch('/state', { cache: 'no-store' }); const s = await r.json();
+    const prev = state; state = s; apply(s, prev);
+  })().finally(() => { loading = null; });
+  return loading;
 }
 function mergePatch(p) {
   if (!state || p.base !== state.seq) return false;           // missed something: resync
@@ -68,7 +75,7 @@ function connect() {
   es.addEventListener('hello', () => { loadState().catch(() => {}); conn.textContent = 'live'; conn.className = ''; });
   es.onmessage = ev => {
     const t0 = performance.now();
-    try { const p = JSON.parse(ev.data); if (!mergePatch(p)) loadState(); } catch (e) { console.warn(e); }
+    try { const p = JSON.parse(ev.data); if (!mergePatch(p)) loadState().catch(() => {}); } catch (e) { console.warn(e); }
     perf.lastPatchMs = performance.now() - t0;
     conn.textContent = 'live · ' + new Date().toLocaleTimeString('en-GB', { hour12: false }); conn.className = '';
   };
@@ -144,6 +151,16 @@ function gpuName() { try { const gl = world.renderer.getContext(); const e = gl.
 
 // ---------- render loop ----------
 const workTimes = [];
+// soak sampler: frame stats since the last call (`agent-hq soak` reads this once a minute)
+const soak = { dts: [], work: 0, rebuilds: 0, lastF: 0, q: null, qChanges: 0 };
+window.__soakTake = () => {
+  const xs = soak.dts.filter(x => x > 0).sort((a, b) => a - b), n = xs.length, sum = xs.reduce((a, b) => a + b, 0), r = world.renderer.info;
+  const out = { frames: n, fps: n ? +(1000 * n / sum).toFixed(1) : 0, p95: n ? +xs[Math.floor(n * .95)].toFixed(2) : 0, workMs: n ? +(soak.work / n).toFixed(2) : 0,
+    heapMB: performance.memory ? +(performance.memory.usedJSHeapSize / 1048576).toFixed(1) : null, dom: document.getElementsByTagName('*').length, feedNodes: document.getElementById('feed').getElementsByTagName('*').length, teamNodes: document.getElementById('team').getElementsByTagName('*').length,
+    geometries: r.memory.geometries, textures: r.memory.textures, programs: r.programs ? r.programs.length : 0, calls: r.render.calls,
+    quality: world.qualityLevel, qualityChanges: soak.qChanges, agents: actors.agents.size, bots: state ? state.bots.length : 0, desks: world.L ? world.L.desks.length : 0, rebuilds: soak.rebuilds };
+  soak.dts = []; soak.work = 0; soak.rebuilds = 0; soak.qChanges = 0; soak.lastF = 0; return out;
+};
 let last = performance.now(), lastRender = 0, qualityAt = 0, gcAt = 0, benchFrame = null;
 const clock = { t: 0 };
 function loop(now) {
@@ -157,7 +174,7 @@ function loop(now) {
     else { const t = world.controls.target, dx = (a.pos.x - t.x) * Math.min(1, dt * 4), dz = (a.pos.z - t.z) * Math.min(1, dt * 4); t.x += dx; t.z += dz; world.camera.position.x += dx; world.camera.position.z += dz; if (Math.abs(dx) + Math.abs(dz) > .001) world.lastMove = now; }
   }
   world.controls.update(); world.clampTarget();
-  const active = BENCH || walking || now - world.lastMove < 400;
+  const active = BENCH || SOAK || walking || now - world.lastMove < 400;
   if (!active && now - lastRender < 31) return;                  // idle: ~30 fps
   if (BENCH && params.has('paced') && now - lastRender < 16.2) return;   // optional 60 Hz pacing
   if (!active) perf.idle();
@@ -167,6 +184,7 @@ function loop(now) {
   world.renderer.render(world.scene, world.camera);
   perf.frame(now, world.renderer);
   perf.work = performance.now() - cbStart; if (benchFrame) workTimes.push(perf.work);
+  if (SOAK) { soak.dts.push(now - (soak.lastF || now)); soak.lastF = now; soak.work += perf.work; if (world.qualityLevel !== soak.q) { if (soak.q != null) soak.qChanges++; soak.q = world.qualityLevel; } }
   if (now - qualityAt > 250) { qualityAt = now; world.autoQuality(perf.stats().fps, active, now); if ((world.frame = (world.frame || 0) + 1) % 4 === 0) world.updateSky(false); }
   if (now - gcAt > 5000) { gcAt = now; actors.gcSlots(); }
   if (benchFrame && !benchFrame(now)) benchFrame = null;

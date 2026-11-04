@@ -19,7 +19,7 @@ const SETTINGS = path.join(HQ, 'settings.json');
 const ORIGINS = [`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`];
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
-const engine = createEngine();
+const engine = createEngine({ readBudgetMs: 60 });   // each tick reads files for at most ~60 ms
 let settings = { muted: false };
 try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS, 'utf8')) }; } catch (e) {}
 const saveSettings = () => { try { fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2)); } catch (e) {} };
@@ -53,15 +53,20 @@ const lastJSON = { bots: new Map(), top: {} };
 const TOP = ['teams', 'counts', 'waiting', 'stuck', 'finished', 'totals', 'feed', 'stuckAfterMin', 'today'];
 const clients = new Set();
 let tickStats = { n: 0, ms: 0, maxMs: 0 };
+const recentTicks = [], recentPatches = [], recentParts = { read: [], build: [], diff: [] };   // [time, value] for the last 60 s (health + soak)
+const keepRecent = (arr, v) => { const t = Date.now(); arr.push([t, v]); while (arr.length && arr[0][0] < t - 60000) arr.shift(); };
+const summarize = arr => { const t = Date.now(), xs = arr.filter(x => x[0] >= t - 60000).map(x => x[1]); return { n: xs.length, avg: xs.length ? +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(2) : 0, max: xs.length ? +Math.max(...xs).toFixed(1) : 0 }; };
 
 function tick(reason) {
   const t0 = process.hrtime.bigint();
+  lastTickAt = Date.now();
   let st;
   try { st = engine.tick(); } catch (e) { log('tick error', e.stack || e); return; }
+  const warm = engine.isWarm();
   // toasts on transitions into waiting / stuck
   const cur = new Map();
   for (const b of st.bots) for (const r of b.robots) cur.set(r.key, { r, b });
-  if (prevStatus) for (const [k, { r }] of cur) {
+  if (prevStatus && warmSeen) for (const [k, { r }] of cur) {   // no toasts while the first read of history is still catching up
     const was = prevStatus.get(k);
     if ((r.status === 'waiting' || r.status === 'stuck') && was !== r.status && Date.now() - (lastToast.get(k) || 0) > 60000) {
       lastToast.set(k, Date.now());
@@ -70,6 +75,7 @@ function tick(reason) {
     }
   }
   prevStatus = new Map([...cur].map(([k, v]) => [k, v.r.status]));
+  if (warm && !warmSeen) { warmSeen = true; log(`warm: history read in ${tickStats.n + 1} ticks`); startBackfill(); }
   // diff against what clients already have
   const patch = { bots: [], removed: [] };
   const seen = new Set();
@@ -85,15 +91,50 @@ function tick(reason) {
     const base = seq; seq++;
     state.seq = seq;
     const msg = `data: ${JSON.stringify({ ...patch, seq, base, now: st.now })}\n\n`;
+    keepRecent(recentPatches, Buffer.byteLength(msg));
     for (const c of clients) { try { c.write(msg); } catch (e) {} }
   } else state.seq = seq;
-  try { engine.persistStats(false); } catch (e) { log('stats error', e.message); }
   const dt = Number(process.hrtime.bigint() - t0) / 1e6;
   tickStats.n++; tickStats.ms += dt; tickStats.maxMs = Math.max(tickStats.maxMs, dt); tickStats.last = reason;
+  keepRecent(recentTicks, dt);
+  const tp = engine.tickParts(); keepRecent(recentParts.read, tp.readMs); keepRecent(recentParts.build, tp.buildMs); keepRecent(recentParts.diff, dt - tp.readMs - tp.buildMs);
+  if (engine.backlog()) scheduleTick('catch-up', 0);      // the read budget ran out: continue right away
 }
 const lastToast = new Map();
-let tickTimer = null;
-function scheduleTick(reason) { if (tickTimer) return; tickTimer = setTimeout(() => { tickTimer = null; tick(reason); }, 250); }
+let warmSeen = false;
+// Coalesced ticks: a burst of file changes (agents writing transcripts) becomes at most 2 ticks per second.
+// While the first read of history is catching up, ticks follow each other with a short gap instead.
+const MIN_TICK_GAP_MS = 500;
+let tickTimer = null, lastTickAt = 0;
+function scheduleTick(reason, debounce = 250) {
+  if (tickTimer) return;
+  const gap = engine.isWarm() ? MIN_TICK_GAP_MS : 30;
+  tickTimer = setTimeout(() => { tickTimer = null; tick(reason); }, Math.max(debounce, lastTickAt + gap - Date.now()));
+}
+
+// ---------- daily stats + memory upkeep: outside ticks ----------
+// Backfill of past days' stats files: one bot-day per setImmediate step, once at startup (after the history
+// is read) and again when a day ends. Today's file and pruning/compaction: once a minute.
+let backfilling = false;
+function startBackfill() {
+  if (backfilling) return; backfilling = true;
+  const t0 = Date.now(); let steps = 0;
+  const step = () => {
+    let more = false;
+    try { more = engine.backfillStep(); } catch (e) { log('backfill error', e.stack || e); }
+    if (more) { steps++; setImmediate(step); return; }
+    backfilling = false;
+    if (steps) log(`stats backfill: ${steps} steps in ${Date.now() - t0} ms`);
+    upkeep();
+  };
+  setImmediate(step);
+}
+function upkeep() {
+  if (!engine.isWarm()) return;
+  try { const r = engine.maintain(); if (r.pruned) log(`pruned ${r.pruned} old sessions from memory`); if (r.pendingDays) startBackfill(); } catch (e) { log('maintain error', e.stack || e); }
+  try { engine.persistToday(); } catch (e) { log('stats error', e.message); }
+  const t = Date.now(); for (const [k, v] of lastToast) if (t - v > 3600000) lastToast.delete(k);
+}
 
 // ---------- file watching (debounced) ----------
 const watchers = [];
@@ -107,7 +148,8 @@ function watch(dir, opts, onName) {
 function setupWatchers() {
   for (const w of watchers.splice(0)) try { w.close(); } catch (e) {}
   watch(HQ, {}, n => { if (/^events-|^roster\.json$|^prices\.json$/.test(n)) scheduleTick('hq:' + n); });
-  watch(path.join(os.homedir(), '.claude', 'projects'), { recursive: true }, n => { if (n.endsWith('.jsonl')) scheduleTick('claude'); });
+  const projects = path.join(os.homedir(), '.claude', 'projects');
+  watch(projects, { recursive: true }, n => { if (n.endsWith('.jsonl')) { engine.hint(path.join(projects, n)); scheduleTick('claude'); } });
   const cx = path.join(engine.CODEX, 'sessions');
   watch(cx, { recursive: true }, n => { if (/rollout-.*\.jsonl$/.test(n)) { engine.addCodexFile(path.join(cx, n)); scheduleTick('codex'); } });
   watch(path.join(engine.CODEX, 'archived_sessions'), {}, n => { if (/^rollout-/.test(n)) { engine.addCodexFile(path.join(engine.CODEX, 'archived_sessions', n)); scheduleTick('codex-archive'); } });
@@ -165,10 +207,12 @@ const server = http.createServer((req, res) => {
     if (url === '/timeline') return send(res, 200, engine.timeline());
     if (url === '/stats') return send(res, 200, engine.stats(7));
     if (url === '/api/health') {
+      if (/[?&]gc=1/.test(req.url) && global.gc) global.gc();   // soak: measure retained memory (server started with --expose-gc)
       const u = process.cpuUsage(cpu0.u), el = (Date.now() - cpu0.t) * 1000;
-      return send(res, 200, { ok: true, pid: process.pid, port: PORT, version: 3, hq: HQ, clients: clients.size, watchers: watchers.length,
+      return send(res, 200, { ok: true, pid: process.pid, port: PORT, version: 3, hq: HQ, clients: clients.size, watchers: watchers.length, openFiles: engine.openFiles(),
         cpuPercentSinceStart: +(100 * (u.user + u.system) / el).toFixed(3), rssMB: +(process.memoryUsage().rss / 1048576).toFixed(1),
-        heapMB: +(process.memoryUsage().heapUsed / 1048576).toFixed(1), ticks: tickStats.n, avgTickMs: tickStats.n ? +(tickStats.ms / tickStats.n).toFixed(2) : 0, maxTickMs: +tickStats.maxMs.toFixed(1) });
+        heapMB: +(process.memoryUsage().heapUsed / 1048576).toFixed(1), ticks: tickStats.n, avgTickMs: tickStats.n ? +(tickStats.ms / tickStats.n).toFixed(2) : 0, maxTickMs: +tickStats.maxMs.toFixed(1),
+        uptimeS: Math.round(process.uptime()), lastMinute: { ticks: summarize(recentTicks), patchBytes: summarize(recentPatches), read: summarize(recentParts.read), build: summarize(recentParts.build), diff: summarize(recentParts.diff) }, engine: engine.memStats() });
     }
     if (url === '/api/settings') return send(res, 200, settings);
     if (url === '/api/toasts') return send(res, 200, toastLog);
@@ -194,10 +238,11 @@ server.listen(PORT, HOST, () => {
   engine.scanCodex();
   tick('start');
   setupWatchers();
-  setInterval(() => tick('heartbeat'), 5000);                                   // time-based rules
+  setInterval(() => scheduleTick('heartbeat', 0), 5000);                        // time-based rules (stuck, idle Codex)
+  setInterval(upkeep, 60000);                                                   // today's stats file, pruning, compaction
   setInterval(() => { for (const c of clients) { try { c.write(': ping\n\n'); } catch (e) {} } }, 25000);
   setInterval(() => { if (watchers.length < 3) setupWatchers(); }, 60000);       // folders created later (e.g. first Codex run)
 });
 process.on('exit', cleanup);
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(sig, () => { try { engine.persistStats(true); } catch (e) {} cleanup(); process.exit(0); });
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(sig, () => { try { if (engine.isWarm()) engine.persistToday(); } catch (e) {} cleanup(); process.exit(0); });
 process.on('uncaughtException', e => log('uncaught', e.stack || e));

@@ -58,8 +58,8 @@ export class Atlas {
     this.src = { image: this.slotCanvas, isDataTexture: false, isCompressedTexture: false };
     this.keys = new Map(); this.uploads = 0;
   }
-  alloc() { return this.free.length ? this.free.pop() : 0; }
-  release(i) { if (i != null) { this.free.push(i); this.keys.delete(i); } }
+  alloc() { return this.free.length ? this.free.pop() : -1; }   // -1 = full (callers skip drawing)
+  release(i) { if (i != null && i >= 0 && !this.free.includes(i)) { this.free.push(i); this.keys.delete(i); } }
   rect(i) { const x = (i % this.cols) * this.sw, y = Math.floor(i / this.cols) * this.sh; return [x / this.W, (y + this.sh) / this.H, this.sw / this.W, -this.sh / this.H]; }
   draw(i, key, painter) {             // repaint slot i only when its key changed
     if (this.keys.get(i) === key) return false;
@@ -195,12 +195,12 @@ export class World {
       blob: canvasTex(64, 64, (g) => { const r = g.createRadialGradient(32, 32, 2, 32, 32, 31); r.addColorStop(0, 'rgba(30,20,30,.45)'); r.addColorStop(1, 'rgba(30,20,30,0)'); g.fillStyle = r; g.fillRect(0, 0, 64, 64); }) };
     this.sky = canvasTex(512, 160, () => {});
     this.atlases = {
-      screens: new Atlas(this.renderer, 1024, 1024, 256, 160),
+      screens: new Atlas(this.renderer, 2048, 1024, 256, 160),   // 48 desks
       tags: new Atlas(this.renderer, 1024, 1024, 256, 64),
       chips: new Atlas(this.renderer, 1024, 1024, 256, 88),
     };
     this.icons = this.iconAtlas();
-    this.quality = { mode: localStorage.getItem('hq-quality') || 'auto', level: 0, lockUntil: 0, below: 0, above: 0 };
+    this.quality = { mode: localStorage.getItem('hq-quality') || 'auto', level: 0, belowSince: 0, aboveSince: 0, changedAt: -1e9, holdUntil: 0 };
     this.hourMode = localStorage.getItem('hq-tod') || 'now';
     this.insets = { left: 0, right: 0, top: 0, bottom: 0 };
     this.group = null; this.lastMove = 0; this.frame = 0;
@@ -245,8 +245,25 @@ export class World {
   }
 
   // ---------- build the static office from a layout ----------
+  // a new layout (new agent, new seat) replaces the static office: free all GPU resources of the old one
+  disposeLayout() {
+    if (!this.group) return;
+    this.scene.remove(this.group);
+    const shared = new Set(Object.values(this.mat));
+    this.group.traverse(o => {
+      if (o.isInstancedMesh) o.dispose();                                   // instanceMatrix / instanceColor buffers
+      if (o.geometry && !o.userData.keepGeo) o.geometry.dispose();
+      for (const m of [].concat(o.material || [])) if (!shared.has(m)) m.dispose();
+    });
+    for (const t of this.layoutTex || []) t.dispose();                      // cloned wood texture, floor-label canvas
+    this.layoutTex = [];
+    if (this.screens) for (const i of this.screens.slots) this.atlases.screens.release(i);
+    this.screens = null; this.group = null;
+  }
   build(L) {
-    if (this.group) { this.scene.remove(this.group); this.group.traverse(o => { if (o.geometry && !o.userData.keepGeo) o.geometry.dispose(); }); }
+    this.disposeLayout();
+    this.layoutTex = [];
+    this.quality.holdUntil = performance.now() + 3000;                    // shader warm-up after a rebuild is not a slow GPU
     const G = this.group = new THREE.Group(); this.scene.add(G); this.L = L;
     const W = L.W, D = L.D, WALL_H = 2.7;
     const B = new Builder();
@@ -328,7 +345,7 @@ export class World {
     const merged = new THREE.Mesh(B.geometry(), this.mat.vc); merged.castShadow = merged.receiveShadow = true; G.add(merged);
     this.staticTris = B.triangles;
     // floor (wood texture)
-    const wt = this.tex.wood.clone(); wt.repeat.set(W / 3, D / 3); wt.needsUpdate = true;
+    const wt = this.tex.wood.clone(); wt.repeat.set(W / 3, D / 3); wt.needsUpdate = true; this.layoutTex.push(wt);
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(W, D), new THREE.MeshStandardMaterial({ map: wt, roughness: .75 }));
     floor.rotation.x = -Math.PI / 2; floor.position.set(W / 2, 0.002, D / 2); floor.receiveShadow = true; G.add(floor); this.floor = floor;
     // window panes: one mesh, UVs into the sky canvas
@@ -358,7 +375,7 @@ export class World {
     const g = c.getContext('2d'); g.font = '800 40px Segoe UI, sans-serif'; g.textBaseline = 'middle';
     const widths = items.map(it => Math.min(Wc - 12, g.measureText(it.text.toUpperCase()).width + 10));
     items.forEach((it, i) => { g.fillStyle = it.board ? '#ffffff' : 'rgba(60,45,72,.82)'; g.fillText(it.text.toUpperCase(), 6, i * H + H / 2 + 2, Wc - 12); });
-    const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
+    const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8; this.layoutTex.push(tex);
     const B = new Builder();
     items.forEach((it, i) => {
       const LH = 0.52, lw = widths[i] / H * LH, uf = widths[i] / Wc;
@@ -431,10 +448,11 @@ export class World {
   }
 
   // ---------- quality ----------
-  setQualityMode(mode) { this.quality.mode = mode; localStorage.setItem('hq-quality', mode); this.quality.level = mode === 'low' ? 3 : 0; this.applyQuality(); }
+  // levels: 0 high · 1 pixel ratio 1 (cheap, no shader change) · 2 no shadows (recompiles every material once) · 3 no glow
+  setQualityMode(mode) { const Q = this.quality; Q.mode = mode; localStorage.setItem('hq-quality', mode); Q.level = mode === 'low' ? 3 : 0; Q.belowSince = Q.aboveSince = 0; Q.changedAt = performance.now(); this.applyQuality(); }
   applyQuality() {
     const lvl = this.quality.mode === 'low' ? 3 : this.quality.mode === 'high' ? 0 : this.quality.level;
-    const shadows = lvl < 1, glow = lvl < 2, pr = lvl >= 3 ? 1 : Math.min(devicePixelRatio, 1.5);
+    const shadows = lvl < 2, glow = lvl < 3, pr = lvl >= 1 ? 1 : Math.min(devicePixelRatio, 1.5);
     if (this.renderer.shadowMap.enabled !== shadows) { this.renderer.shadowMap.enabled = shadows; this.sun.castShadow = shadows; this.scene.traverse(o => { if (o.material) [].concat(o.material).forEach(m => m.needsUpdate = true); }); this.renderer.shadowMap.needsUpdate = true; }
     this.glowOn = glow;
     if (this.renderer.getPixelRatio() !== pr) { this.renderer.setPixelRatio(pr); this.resize(); }
@@ -442,11 +460,21 @@ export class World {
     this.qualityLevel = lvl;
     this.onQuality && this.onQuality(lvl);
   }
+  // Auto quality with hysteresis: one step down after 5 s under 50 fps, one step up only after 60 s at 58+ fps,
+  // never more than one change per minute (each shadow toggle recompiles shaders, so flapping would stutter).
   autoQuality(fps, active, now) {   // called ~4x per second
-    const Q = this.quality; if (Q.mode !== 'auto' || !active) { Q.below = Q.above = 0; return; }
-    if (fps < 50) { Q.below += .25; Q.above = 0; } else if (fps >= 58) { Q.above += .25; Q.below = 0; } else { Q.below = Q.above = 0; }
-    if (Q.below >= 3 && Q.level < 3) { Q.level++; Q.below = 0; Q.lastDown = now; this.applyQuality(); }
-    else if (Q.above >= 10 && Q.level > 0 && now > Q.lockUntil) { if (Q.lastUp && now - Q.lastUp < 25000 && Q.lastDown > Q.lastUp) Q.lockUntil = now + 120000; else { Q.level--; Q.lastUp = now; this.applyQuality(); } Q.above = 0; }
+    const Q = this.quality;
+    if (Q.mode !== 'auto' || !active || now < Q.holdUntil) { Q.belowSince = Q.aboveSince = 0; return; }
+    if (fps < 50) { Q.aboveSince = 0; Q.belowSince = Q.belowSince || now; }
+    else if (fps >= 58) { Q.belowSince = 0; Q.aboveSince = Q.aboveSince || now; }
+    else Q.belowSince = Q.aboveSince = 0;
+    if (now - Q.changedAt < 60000) return;
+    let next = Q.level;
+    if (Q.belowSince && now - Q.belowSince >= 5000 && Q.level < 3) next++;
+    else if (Q.aboveSince && now - Q.aboveSince >= 60000 && Q.level > 0) next--;
+    if (next === Q.level) return;
+    Q.level = next; Q.changedAt = now; Q.belowSince = Q.aboveSince = 0; Q.holdUntil = now + 3000;
+    this.applyQuality();
   }
 
   // ---------- camera ----------

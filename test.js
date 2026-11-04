@@ -157,6 +157,7 @@ E.persistStats(true);
 const statFile = path.join(HQ, 'stats', dayKey(NOW) + '.json');
 const old = new Date(NOW); old.setDate(old.getDate() - 3);
 fs.writeFileSync(path.join(HQ, 'stats', dayKey(old.getTime()) + '.json'), JSON.stringify({ date: dayKey(old.getTime()), final: true, bots: { locqa: { name: 'LocQA', in: 5, out: 5, total: 10, cost: 1.5 } }, total: { total: 10, cost: 1.5 } }));
+E.close();   // release kept file handles before deleting the files
 for (const f of fs.readdirSync(HQ)) if (/^events/.test(f)) fs.unlinkSync(path.join(HQ, f));
 fs.rmSync(TX, { recursive: true, force: true });
 const E2 = createEngine({ home: HOME, now: () => NOW });
@@ -165,6 +166,76 @@ const todayAgg = ST.days[ST.days.length - 1];
 check('stats: daily file written (stats/YYYY-MM-DD.json)', fs.existsSync(statFile));
 check('stats: history survives deleted events + transcripts', todayAgg.bots.locqa && todayAgg.bots.locqa.total === expIn + expOut && ST.days.length === 7 && ST.days[3].bots.locqa && ST.days[3].bots.locqa.cost === 1.5);
 check('stats: busiest bot today', ST.busiestToday && ST.busiestToday.botId === 'researcher', JSON.stringify(ST.busiestToday));
+
+// ---------- memory: bounded arrays + pruning (10,000 synthetic events over 3 days) ----------
+{
+  const MEM = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hq-mem-'));
+  const MHQ = path.join(MEM, '.agent-hq'); fs.mkdirSync(MHQ, { recursive: true });
+  fs.copyFileSync(path.join(CODE, 'prices.json'), path.join(MHQ, 'prices.json'));
+  fs.writeFileSync(path.join(MHQ, 'roster.json'), JSON.stringify({ teams: ['Ops', 'Research'], bots: [
+    { id: 'm1', name: 'Marathon', team: 'Ops', folders: ['~/w/m1'] }, { id: 'm2', name: 'Shorty', team: 'Research', folders: ['~/w/m2'] },
+    { id: 'rs', name: 'Researcher', team: 'Research', agentType: 'researcher', folders: [] }] }));
+  const T = (() => { const d = new Date(); d.setHours(18, 0, 0, 0); return d.getTime(); })();   // "now" = today 18:00 local
+  const D0 = (() => { const d = new Date(T); d.setHours(0, 0, 0, 0); return d.getTime(); })();
+  const MTX = path.join(MEM, 'tx'); fs.mkdirSync(MTX);
+  const evs = {}, txs = {}; let count = 0, k = 0;
+  const E_ = (t, event, sid, folder, x = {}) => { (evs[monthKey(t)] ||= []).push(JSON.stringify({ time: new Date(t).toISOString(), event, session_id: sid, cwd: path.join(MEM, 'w', folder), transcript_path: path.join(MTX, sid + '.jsonl'), ...x })); count++; };
+  const L_ = (sid, t, obj) => { (txs[sid] ||= []).push(JSON.stringify({ timestamp: new Date(t).toISOString(), ...obj })); count++; };
+  const A_ = (sid, t, content) => L_(sid, t, { type: 'assistant', message: { id: `${sid}-${k++}`, model: 'claude-sonnet-5-5', content, usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 } } });
+  // two past days: 30 short sessions each (start, prompt, 30 lines, Stop, SessionEnd)
+  for (const day of [2, 1]) for (let i = 0; i < 30; i++) {
+    const sid = `p${day}-${i}`, t0 = D0 - day * 86400000 + 9 * 3600000 + i * 600000, f = i % 2 ? 'm1' : 'm2';
+    E_(t0, 'SessionStart', sid, f); E_(t0 + 1000, 'UserPromptSubmit', sid, f);
+    for (let j = 0; j < 30; j++) A_(sid, t0 + 2000 + j * 4000, j % 2 ? [{ type: 'text', text: 'step ' + j }] : [{ type: 'tool_use', id: `${sid}t${j}`, name: 'Read', input: { file_path: 'a.js' } }]);
+    E_(t0 + 130000, 'Stop', sid, f, { summary: 'done' }); E_(t0 + 140000, 'SessionEnd', sid, f);
+  }
+  // today: one marathon session, a line every 4 s from 09:00 to 18:00, a turn every 10 min, plus a subagent
+  const mar = 'marathon'; E_(D0 + 9 * 3600000 - 5000, 'SessionStart', mar, 'm1');
+  for (let t = D0 + 9 * 3600000, j = 0; t < T; t += 4000, j++) {
+    if (j % 150 === 0) { E_(t, 'UserPromptSubmit', mar, 'm1'); L_(mar, t, { type: 'user', message: { role: 'user', content: 'turn ' + j } }); continue; }
+    if (j % 150 === 149) { A_(mar, t, [{ type: 'text', text: 'turn done ' + j }]); E_(t + 1, 'Stop', mar, 'm1', { summary: 'turn done ' + j }); continue; }
+    A_(mar, t, [{ type: 'text', text: 'line ' + j }]);
+  }
+  const lastPrompt = D0 + 9 * 3600000 + Math.floor((T - 1 - (D0 + 9 * 3600000)) / 600000) * 600000;
+  E_(T - 400000, 'SubagentStart', mar, 'm1', { agent_id: 'sub1', agent_type: 'researcher' });
+  // today: 10 short sessions that already ended
+  for (let i = 0; i < 10; i++) { const sid = `t-${i}`, t0 = D0 + 8 * 3600000 + i * 1800000; E_(t0, 'SessionStart', sid, 'm2'); E_(t0 + 1000, 'UserPromptSubmit', sid, 'm2'); for (let j = 0; j < 20; j++) A_(sid, t0 + 2000 + j * 3000, [{ type: 'text', text: 'x' }]); E_(t0 + 70000, 'Stop', sid, 'm2', { summary: 'ok' }); E_(t0 + 80000, 'SessionEnd', sid, 'm2'); }
+  for (const [m, ls] of Object.entries(evs)) fs.writeFileSync(path.join(MHQ, `events-${m}.jsonl`), ls.sort().join('\n') + '\n');
+  for (const [sid, ls] of Object.entries(txs)) fs.writeFileSync(path.join(MTX, sid + '.jsonl'), ls.join('\n') + '\n');
+  const subTx = path.join(MTX, mar, 'subagents'); fs.mkdirSync(subTx, { recursive: true });
+  fs.writeFileSync(path.join(subTx, 'agent-sub1.jsonl'), Array.from({ length: 200 }, (_, j) => JSON.stringify({ type: 'assistant', timestamp: new Date(T - 390000 + j * 1000).toISOString(), message: { id: 'sb' + j, model: 'claude-sonnet-5-5', content: [{ type: 'tool_use', id: 'st' + j, name: 'WebSearch', input: { query: 'q' } }], usage: { input_tokens: 3, output_tokens: 2 } } })).join('\n') + '\n');
+  count += 200;
+  // two copies of the same home: A keeps everything (old behaviour), B prunes + compacts
+  const MEM2 = MEM + '-b'; fs.cpSync(MEM, MEM2, { recursive: true });
+  const fixHome = (src, dst) => { for (const f of fs.readdirSync(path.join(dst, '.agent-hq'))) if (/^events-/.test(f)) { const p = path.join(dst, '.agent-hq', f); fs.writeFileSync(p, fs.readFileSync(p, 'utf8').split(src).join(dst).split(src.replace(/\\/g, '\\\\')).join(dst.replace(/\\/g, '\\\\'))); } };
+  fixHome(MEM, MEM2);
+  const warmUp = E => { for (let i = 0; i < 200; i++) { E.tick(); if (!E.backlog()) break; } };
+  const EA = createEngine({ home: MEM, now: () => T }); warmUp(EA); EA.persistStats(true);
+  const EB = createEngine({ home: MEM2, now: () => T }); warmUp(EB); EB.persistStats(true);
+  const before = EB.memStats();
+  const r = EB.maintain(); EB.maintain();
+  const after = EB.memStats(), SB = EB.tick(), SA = EA.tick();
+  const mB = EB._internals.sessions.get(mar);
+  check(`memory: ${count.toLocaleString('en-US')} synthetic events read (3 days, 71 sessions)`, count >= 10000 && before.sessions === 71, `${count} events, ${before.sessions} sessions`);
+  check('memory: sessions that ended before today are dropped from memory', after.sessions === 11 && r.pruned >= 60 && !EB._internals.sessions.has('p2-0'), JSON.stringify({ r, after }));
+  const lim = 2 * Math.ceil((T - D0) / 60000) + 12 * 20 + 8;
+  check(`memory: arrays stay bounded (marathon lines ${mB.lines.length} of ${EA._internals.sessions.get(mar).lines.length}, every list <= ${lim})`,
+    ['lines', 'pend', 'allEv', 'prompts', 'rests'].every(k2 => mB[k2].length <= lim) && mB.lines.length < 3000 && mB.lines.length === mB.pend.length && mB.usage.size <= 16 && after.finished <= 200 && after.arrayItems < before.arrayItems / 2,
+    JSON.stringify({ lines: mB.lines.length, allEv: mB.allEv.length, usage: mB.usage.size, after }));
+  const tokA = Object.fromEntries(SA.bots.map(b => [b.id, b.tokens])), tokB = Object.fromEntries(SB.bots.map(b => [b.id, b.tokens]));
+  check('pruning: today\'s tokens per bot unchanged (folded usage)', ['m1', 'm2', 'rs'].every(id => ['in', 'out', 'cw', 'cr', 'total'].every(f => tokA[id][f] === tokB[id][f]) && approx(tokA[id].cost, tokB[id].cost, 1e-9)) && tokA.m1.total > 0, JSON.stringify({ tokA, tokB }));
+  const tlA = EA._internals.timelineFor(D0, T + 1).seconds, tlB = EB._internals.timelineFor(D0, T + 1).seconds;
+  check('pruning: today\'s timeline seconds unchanged (full resample after compaction)', JSON.stringify(tlA) === JSON.stringify(tlB) && tlA.m1.working > 0, JSON.stringify({ tlA: tlA.m1, tlB: tlB.m1 }));
+  const stA = s => s.bots.map(b => b.robots.map(x => [x.key, x.status, x.turn && x.turn.requested, x.turn && x.turn.working]).join()).join('|');
+  check('pruning: live statuses + current turn unchanged', stA(SA) === stA(SB) && SB.bots.find(b => b.id === 'm1').robots[0].turn.requested === lastPrompt, stA(SB).slice(0, 200));
+  const readDay = (home, off) => JSON.parse(fs.readFileSync(path.join(home, '.agent-hq', 'stats', dayKey(D0 - off * 86400000) + '.json'), 'utf8'));
+  const dA = [2, 1, 0].map(o => readDay(MEM, o)), dB = [2, 1, 0].map(o => readDay(MEM2, o));
+  check('pruning: past days final in stats files before they leave memory; same totals', dB[0].final && dB[1].final && !dB[2].final && [0, 1, 2].every(i => dA[i].total.total === dB[i].total.total && dA[i].total.total > 0), JSON.stringify(dB.map(d => [d.date, d.final, d.total.total])));
+  EB.persistToday(); const todayB = readDay(MEM2, 0);
+  check('pruning: today\'s stats file after pruning matches the unpruned engine', todayB.total.total === dA[2].total.total && JSON.stringify(todayB.bots.m1.seconds) === JSON.stringify(dA[2].bots.m1.seconds), JSON.stringify([todayB.bots.m1, dA[2].bots.m1]));
+  EA.close();
+  for (const d of [MEM, MEM2]) fs.rmSync(d, { recursive: true, force: true });
+}
 
 // ---------- Codex (read-only rollout logs) ----------
 const { writeCodexSession } = require('./fixtures');
@@ -198,7 +269,7 @@ check('codex: unlisted folder becomes a Codex drop-in in the Codex lab', SC.bots
 check('codex: task_complete lands in "finished today"', SC.finished.some(f => f.botId === 'cs' && f.summary === 'hi'));
 check('codex: last actions parsed ("Shell: npm test")', cb('cs').robots[0].actions.some(a => a.text === 'Shell: npm test'));
 check('codex: ~/.codex is never written', snapshot(path.join(CX, '.codex')) === before);
-fs.rmSync(CX, { recursive: true, force: true });
+EC.close(); fs.rmSync(CX, { recursive: true, force: true });
 
 // ---------- office layout + walking paths (same ES modules the page uses) ----------
 async function layoutChecks() {

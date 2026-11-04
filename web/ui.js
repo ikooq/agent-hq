@@ -51,7 +51,7 @@ export class UI {
       tod.appendChild(b);
     }
     const q = $('quality'); q.value = world.quality.mode; q.onchange = () => world.setQualityMode(q.value);
-    world.onQuality = lvl => { const names = ['High', 'High · no shadows', 'Medium · no glow', 'Low · 1x pixels']; setText($('qualityNow'), world.quality.mode === 'auto' ? 'Auto → ' + names[lvl] : ''); };
+    world.onQuality = lvl => { const names = ['High', 'High · 1x pixels', 'Medium · no shadows', 'Low · no glow']; setText($('qualityNow'), world.quality.mode === 'auto' ? 'Auto → ' + names[lvl] : ''); };
     world.onQuality(world.qualityLevel || 0);
     // legend
     $('legend').innerHTML = ['working', 'running', 'waiting', 'stuck', 'resting', 'off'].map(k => `<span><i style="background:${ST[k].css}"></i>${ST[k].label}</span>`).join('');
