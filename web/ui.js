@@ -211,13 +211,14 @@ export class UI {
   }
 
   // ---------- insights: timeline + stats (v2 views, as tabs) ----------
-  openInsights(tab) { this.modal.classList.add('show'); this.tab = tab; this.renderInsightsShell(); tab === 'timeline' ? this.loadTimeline() : this.loadStats(); }
+  openInsights(tab) { this.modal.classList.add('show'); this.tab = tab; this.renderInsightsShell(); this.loadTab(); }
+  loadTab() { this.tab === 'timeline' ? this.loadTimeline() : this.tab === 'report' ? this.loadReport() : this.loadStats(); }
   closeInsights() { this.modal.classList.remove('show'); }
   renderInsightsShell() {
-    this.modal.innerHTML = `<div class="modal-card"><div class="m-head"><div class="tabs"><button data-tab="timeline" class="${this.tab === 'timeline' ? 'on' : ''}">Today's timeline</button><button data-tab="stats" class="${this.tab === 'stats' ? 'on' : ''}">Stats · 7 days</button></div>
+    this.modal.innerHTML = `<div class="modal-card"><div class="m-head"><div class="tabs"><button data-tab="timeline" class="${this.tab === 'timeline' ? 'on' : ''}">Today's timeline</button><button data-tab="stats" class="${this.tab === 'stats' ? 'on' : ''}">Stats · 7 days</button><button data-tab="report" class="${this.tab === 'report' ? 'on' : ''}">Report</button></div>
       <span class="muted">tokens = input + output · $ are estimates</span><button class="hbtn m-close" aria-label="Close">✕</button></div><div class="m-body" id="mbody"><div class="empty">Loading…</div></div><div class="tl-tip" id="tip"></div></div>`;
     this.modal.querySelector('.m-close').onclick = () => this.closeInsights();
-    for (const b of this.modal.querySelectorAll('[data-tab]')) b.onclick = () => { this.tab = b.dataset.tab; this.renderInsightsShell(); this.tab === 'timeline' ? this.loadTimeline() : this.loadStats(); };
+    for (const b of this.modal.querySelectorAll('[data-tab]')) b.onclick = () => { this.tab = b.dataset.tab; this.renderInsightsShell(); this.loadTab(); };
     const tip = this.modal.querySelector('#tip');
     this.modal.onmousemove = e => { const el = e.target.closest('[data-tip]'); if (!el) { tip.style.display = 'none'; return; } tip.textContent = el.dataset.tip; tip.style.display = 'block'; tip.style.left = (e.clientX + 14) + 'px'; tip.style.top = (e.clientY - 40) + 'px'; };
   }
@@ -232,6 +233,23 @@ export class UI {
       ${(s ? s.bots : []).map(b => `<div class="tl-row"><div class="tl-lab">${esc(b.name)}</div><div class="tl-track">${(rows.get(b.id) || { segments: [] }).segments.map(([a, z, st]) =>
         `<b class="tseg" data-tip="${esc(b.name)} · ${LBL[st]} ${hhmm(a)}–${hhmm(Math.min(z, Date.now()))} (${dur(Math.min(z, Date.now()) - a)})" style="left:${pct(a)}%;width:max(2px, calc(${(z - a) / span * 100}% - 1px));background:${COL[st]}"></b>`).join('')}
         <i class="now" style="left:${pct(Date.now())}%"></i></div></div>`).join('')}`;
+  }
+  // daily report: built on the server from local logs (child process), shown in a sandboxed frame
+  async loadReport(day, fresh) {
+    const body = this.modal.querySelector('#mbody'); if (!body || this.tab !== 'report') return;
+    const today = new Date(); const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    day = day || this.reportDay || iso(today); this.reportDay = day;
+    let saved = []; try { saved = this.bench ? [] : await (await fetch('/api/reports')).json(); } catch (e) {}
+    body.innerHTML = `<div class="rp-bar"><label>Day <input type="date" id="rpDate" value="${esc(day)}" max="${iso(today)}"></label>
+      <button class="hbtn text" id="rpFresh">Rebuild</button><a class="hbtn text" id="rpOpen" target="_blank" rel="noopener" href="/report?date=${esc(day)}">Open in a new tab</a>
+      <span class="muted">Saved: ${saved.slice(0, 7).map(d => `<a href="#" data-day="${esc(d)}">${esc(d.slice(5))}</a>`).join(' · ') || 'none yet'} · written automatically at 23:00</span></div>
+      <div class="rp-wrap"><div class="empty" id="rpWait">Building the report from local logs…</div><iframe id="rpFrame" sandbox title="Daily report"></iframe></div>`;
+    const frame = body.querySelector('#rpFrame');
+    frame.onload = () => { const w = body.querySelector('#rpWait'); if (w) w.remove(); };
+    frame.src = this.bench ? 'about:blank' : `/report?date=${encodeURIComponent(day)}${fresh ? '&fresh=1' : ''}`;
+    body.querySelector('#rpDate').onchange = e => { if (e.target.value) this.loadReport(e.target.value); };
+    body.querySelector('#rpFresh').onclick = () => this.loadReport(day, true);
+    for (const a of body.querySelectorAll('[data-day]')) a.onclick = e => { e.preventDefault(); this.loadReport(a.dataset.day); };
   }
   async loadStats() {
     let d; try { d = this.bench ? { days: [], busiestToday: null } : await (await fetch('/stats')).json(); } catch (e) { return; }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// agent-hq start | stop | restart | status | test | bench | soak | open | install
+// agent-hq start | stop | restart | status | test | bench | soak | report | open | install
 'use strict';
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const { spawn, execFileSync } = require('child_process');
@@ -160,6 +160,7 @@ usage: agent-hq <command>
   open      start if needed, then open ${URL_}
   test      run the self-test against a temp home (synthetic data)
   bench     60 s browser benchmark with 15 fake agents (fps, p95, draw calls, heap)
+  report    daily report from local logs: ~/.agent-hq/reports/YYYY-MM-DD.html (--date=YYYY-MM-DD, default today)
   soak      long run through a real server on a temp home (--minutes=60): leaks + slowdown, CSV in ~/.agent-hq
   install   (re)install hooks, hidden autostart and the agent-hq command`;
 
@@ -178,6 +179,7 @@ usage: agent-hq <command>
     case 'install': install(); break;
     case 'bench': await bench(); break;
     case 'soak': await require('./soak').main(); break;
+    case 'report': require('./report').main(process.argv.slice(3)); break;
     default: console.log(usage); if (cmd && cmd !== 'help' && cmd !== '--help') process.exitCode = 2;
   }
 })();

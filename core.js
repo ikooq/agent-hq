@@ -220,13 +220,13 @@ function createEngine(opts = {}) {
   function newSession(id, e, source = 'claude') {
     return { id, source, cwd: e.cwd || '', transcript: null, first: ms(e.time) || now(), starts: [], prompts: [], rests: [], perms: [], ends: [],
       allEv: [], permMsgs: [], tx: { offset: 0, rest: '' }, usage: new Map(), usageDays: new Map(), lines: [], pend: [], pending: new Map(),
-      lastLine: 0, model: null, modelTime: 0, actions: [], texts: [], step: '', task: null, subIds: new Set(),
+      lastLine: 0, model: null, modelTime: 0, actions: [], texts: [], step: '', task: null, subIds: new Set(), daily: new Map(),
       restOffMs: source === 'codex' ? CODEX_REST_OFF_MS : 0 };
   }
   function newSub(e) {
     return { id: e.agent_id, type: e.agent_type || 'agent', parent: e.session_id, start: ms(e.time), stop: 0, transcript: e.agent_transcript_path || null,
       tx: { offset: 0, rest: '' }, usage: new Map(), usageDays: new Map(), lines: [], pend: [], pending: new Map(), lastLine: 0, model: null, modelTime: 0,
-      actions: [], texts: [], step: '', task: null, first: ms(e.time), permMsgs: [] };
+      actions: [], texts: [], step: '', task: null, first: ms(e.time), permMsgs: [], daily: new Map() };
   }
 
   function applyEvent(e) {
@@ -284,6 +284,13 @@ function createEngine(opts = {}) {
   }
   function pushLine(s, t) { if (t >= (s.lines[s.lines.length - 1] || 0)) { s.lines.push(t); s.pend.push(s.pending.size > 0); } s.lastLine = Math.max(s.lastLine, t); }
   function pushAction(s, t, label) { s.actions.push({ t, text: label }); if (s.actions.length > 30) s.actions.shift(); s.step = label; }
+  // per-day activity for the daily report: distinct files edited, commands run
+  function bumpDaily(s, t, files, cmd) {
+    const day = dayKey(t); let d = s.daily.get(day);
+    if (!d) s.daily.set(day, d = { files: new Set(), cmds: 0 });
+    for (const f of files || []) if (f) d.files.add(String(f).replace(/\\/g, '/').toLowerCase());
+    if (cmd) d.cmds++;
+  }
   function pushText(s, t, text) { s.step = 'Writing: ' + clip(text, 90); s.texts.push({ t, text: clip(text, 300) }); if (s.texts.length > 40) s.texts.shift(); }
   function addUsageRec(s, key, rec) {
     rec.sum = rec.in + rec.out + rec.cw5 + rec.cw1 + rec.cr;
@@ -294,7 +301,7 @@ function createEngine(opts = {}) {
   function readTranscript(s, file) {
     if (!file) return;
     const lines = tail(file, s.tx);
-    if (s.tx.reset) { s.tx.reset = false; s.usage.clear(); s.usageDays.clear(); s.lines = []; s.pend = []; s.pending.clear(); s.actions = []; s.texts = []; }
+    if (s.tx.reset) { s.tx.reset = false; s.usage.clear(); s.usageDays.clear(); s.lines = []; s.pend = []; s.pending.clear(); s.actions = []; s.texts = []; s.daily.clear(); }
     for (const l of lines) {
       let j; try { j = JSON.parse(l); } catch (x) { continue; }
       if ((j.type !== 'assistant' && j.type !== 'user') || !j.message) continue;
@@ -311,7 +318,12 @@ function createEngine(opts = {}) {
             cw5: Math.max(0, cwAll - cw1), cw1, cr: u.cache_read_input_tokens || 0 });
         }
         for (const c of content) {
-          if (c.type === 'tool_use') { const label = actionLabel(c.name, c.input); s.pending.set(c.id, { t, label, name: c.name }); pushAction(s, t, label); }
+          if (c.type === 'tool_use') {
+            const label = actionLabel(c.name, c.input); s.pending.set(c.id, { t, label, name: c.name }); pushAction(s, t, label);
+            const inp = c.input || {};
+            if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(c.name)) bumpDaily(s, t, [inp.file_path || inp.notebook_path], false);
+            else if (c.name === 'Bash' || c.name === 'PowerShell') bumpDaily(s, t, null, true);
+          }
           else if (c.type === 'text' && c.text && c.text.trim()) pushText(s, t, c.text);
           else if (c.type === 'thinking' && !s.pending.size) s.step = 'Thinking…';
         }
@@ -425,6 +437,12 @@ function createEngine(opts = {}) {
           const label = codexActionLabel(p.name || 'shell', p.arguments ?? p.input ?? (p.action && { command: p.action.command }), p.namespace);
           s.pending.set(p.call_id || p.id, { t, label, name: p.name });
           pushAction(s, t, label);
+          if (/^Shell: /.test(label)) bumpDaily(s, t, null, true);
+          else {
+            const raw = p.arguments ?? p.input ?? '', txt = typeof raw === 'string' ? raw : JSON.stringify(raw);
+            const files = [...txt.matchAll(/\*\*\* (?:Update|Add|Delete) File: ([^\n"\\]+)/g)].map(m => m[1].trim());
+            if (files.length) bumpDaily(s, t, files, false);
+          }
           if (/^request_user_input/.test(p.name || '')) { insertSorted(s.perms, t); s.permMsgs.push([t, 'Codex asks you a question']); }
         } else if (/_output$/.test(ty)) {
           s.pending.delete(p.call_id);
@@ -786,6 +804,43 @@ function createEngine(opts = {}) {
     return { days, busiestToday: busiest && busiest[1].total ? { botId: busiest[0], name: busiest[1].name, tokens: busiest[1].total, cost: busiest[1].cost } : null };
   }
 
+  // ---------- daily report (built by report.js in a child process from a fresh engine: logs + transcripts) ----------
+  function report(day) {
+    const d0 = dayStart(day), d1 = d0 + DAY, t = now(), until = Math.min(d1, t + 1);
+    const { bots } = botsSkeleton(), rows = [], fin = [];
+    for (const f of finished) if (f.t >= d0 && f.t < d1) {
+      const s = f.session, bid = botFor(s.cwd, s.source), b = bots.get(bid);
+      fin.push({ t: f.t, botId: bid, bot: b ? b.name : 'Drop-in', summary: clip(f.summary || ((s.texts.filter(x => x.t <= f.t + 2000).pop() || {}).text) || '', 200) });
+    }
+    for (const b of bots.values()) {
+      const all = [...b.sessions, ...b.subs];
+      const tl = timelineForBot(b, d0, until);
+      const tokens = tokenSum(); for (const x of all) addUsage(tokens, x, day); tokens.total = tokens.in + tokens.out;
+      const files = new Set(); let commands = 0;
+      for (const x of all) { const d = x.daily && x.daily.get(day); if (d) { d.files.forEach(f => files.add(f)); commands += d.cmds; } }
+      // each permission prompt = one wait, from the prompt until the next transcript line, prompt, stop or end
+      let perms = 0, permSec = 0;
+      const after = (a, p) => { const i = idxLE(a, p) + 1; return i < a.length ? a[i] : Infinity; };
+      for (const s of b.sessions) for (const p of s.perms) if (p >= d0 && p < d1) {
+        perms++;
+        permSec += Math.max(0, Math.min(after(s.lines, p), after(s.prompts, p), after(s.rests, p), after(s.ends, p), until) - p) / 1000;
+      }
+      // episodes: segments of one status, merged across gaps of up to 2 minutes (a sample of another status in between)
+      const segs = tl.segs, count = st => { let n = 0, last = -Infinity; for (const x of segs) if (x[2] === st) { if (x[0] - last > 120000) n++; last = x[1]; } return n; };
+      const finishedN = fin.filter(f => f.botId === b.id).length;
+      const active = tl.secs.working + tl.secs.waiting + tl.secs.stuck;
+      if (!active && !tl.secs.resting && !tokens.in && !tokens.out && !tokens.cr && !finishedN && !files.size && !commands) continue;
+      rows.push({ id: b.id, name: b.name, team: b.team, source: b.source, dropIn: b.dropIn, activeSec: active, workingSec: tl.secs.working, restingSec: tl.secs.resting,
+        finished: finishedN, files: files.size, commands, tokens, waits: Math.max(perms, count("waiting")), waitSec: Math.max(tl.secs.waiting, Math.round(permSec)), stuck: count('stuck'), stuckSec: tl.secs.stuck,
+        segments: segs.map(x => [x[0], Math.min(x[1], until), x[2]]) });
+    }
+    rows.sort((a, b) => b.activeSec - a.activeSec || b.tokens.total - a.tokens.total);
+    const sum = k => rows.reduce((a, r) => a + r[k], 0);
+    const totals = { activeSec: sum('activeSec'), finished: fin.length, files: sum('files'), commands: sum('commands'), waits: sum('waits'), waitSec: sum('waitSec'), stuck: sum('stuck'),
+      tokens: rows.reduce((a, r) => { for (const k of ['in', 'out', 'cw', 'cr', 'total', 'cost']) a[k] += r.tokens[k]; a.unpriced = a.unpriced || r.tokens.unpriced; return a; }, tokenSum()) };
+    return { date: day, dayStart: d0, until, partial: until < d1, generated: t, bots: rows, totals, finished: fin.sort((a, b) => a.t - b.t) };
+  }
+
   // ---------- memory: prune what today no longer needs, compact what stays ----------
   // Status, timeline and stats for today need: sessions with data today (or still on at midnight), the last
   // entry before midnight of each time list, and per-minute detail of today. Everything older is already in
@@ -829,6 +884,7 @@ function createEngine(opts = {}) {
       x.lines = x.lines.filter((_, i) => m[i]); x.pend = x.pend.filter((_, i) => m[i]);
     }
     foldUsage(x, dayKey(cutoff));
+    if (x.daily) for (const d of [...x.daily.keys()]) if (d < dayKey(cutoff)) x.daily.delete(d);   // past days: in reports/ already
   }
   function compactSession(s, cutoff, exactFrom) {
     for (const k of ['starts', 'prompts', 'rests', 'perms', 'ends', 'allEv']) compactTimes(s, k, cutoff, exactFrom);
@@ -879,7 +935,7 @@ function createEngine(opts = {}) {
   }
 
   return {
-    tick, state: () => lastState || tick(), timeline, stats, persistStats, persistToday, backfillStep, maintain, hint, roster, expand, botFor, HQ, CODEX,
+    tick, state: () => lastState || tick(), timeline, stats, report, persistStats, persistToday, backfillStep, maintain, hint, roster, expand, botFor, HQ, CODEX,
     addCodexFile, scanCodex: () => scanCodex(true), memStats, tickParts: () => tickParts, close: () => closeIdleFds(true), openFiles: () => fdCache.size, isWarm: () => warm, backlog: () => backlog,
     watchedFiles: () => ({ codex: [...codexFiles.keys()], transcripts: [...sessions.values()].map(s => s.transcript).filter(Boolean) }),
     _internals: { sessions, subs, finished, sessionStatusAt, subStatusAt, costOf, priceFor, timelineFor, todayTimeline, pendingDays },

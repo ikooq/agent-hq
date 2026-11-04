@@ -9,4 +9,5 @@ settings.json
 soak-*.csv
 screenshots/
 screenshot-*.png
+reports/
 node_modules/

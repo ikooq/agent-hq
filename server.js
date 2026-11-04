@@ -2,7 +2,7 @@
 // Agent HQ v3 server. Zero dependencies, binds 127.0.0.1 only.
 //   GET /            the office            GET /state     full state (first load)
 //   GET /events      Server-Sent Events: only what changed (bots by id, counts, feed…)
-//   GET /timeline    GET /stats    GET /api/health    GET /api/settings
+//   GET /timeline    GET /stats    GET /api/health    GET /api/settings    GET /report?date=YYYY-MM-DD    GET /api/reports
 //   POST /api/mute {muted}   POST /api/open {botId, app?: 'vscode'}   (same-origin JSON only)
 // Files are read incrementally by byte offset; fs.watch (debounced) triggers refreshes,
 // plus a 5 s heartbeat for time-based rules (stuck after 10 min, idle Codex threads).
@@ -190,6 +190,43 @@ function openFolder(botId, app) {
   }
   return { code: 200, body: { ok: true, opened: dir } };
 }
+// ---------- daily report: built by report.js in a child process (a full read never blocks the office) ----------
+const REPORTS = path.join(HQ, 'reports');
+const { dayKey } = require('./core');
+const building = new Map();   // day -> Promise<file|null>
+function buildReport(day) {
+  if (building.has(day)) return building.get(day);
+  const p = new Promise(resolve => {
+    const file = path.join(REPORTS, day + '.html'), t0 = Date.now();
+    const child = spawn(process.execPath, [path.join(__dirname, 'report.js'), '--date=' + day, '--quiet'], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], env: process.env });
+    let err = ''; child.stderr.on('data', d => { if (err.length < 4000) err += d; });
+    const kill = setTimeout(() => { try { child.kill(); } catch (e) {} }, 180000);
+    child.on('error', () => {});
+    child.on('close', code => { clearTimeout(kill); building.delete(day); if (code === 0) log(`report ${day} written in ${Date.now() - t0} ms`); else log('report failed', day, err.trim()); resolve(code === 0 && fs.existsSync(file) ? file : null); });
+  });
+  building.set(day, p);
+  return p;
+}
+async function serveReport(req, res, day, fresh) {
+  const file = path.join(REPORTS, day + '.html'), today = dayKey(Date.now());
+  if (day > today) return send(res, 404, { error: 'that day has not happened yet' });
+  let st = null; try { st = fs.statSync(file); } catch (e) {}
+  // past days: built once (rebuild with fresh=1); today: rebuilt when older than 5 minutes
+  const stale = !st || fresh || (day === today && Date.now() - st.mtimeMs > 300000) || (day < today && st.mtimeMs < new Date(day + 'T23:59:59').getTime());
+  if (stale && !(await buildReport(day)) && !st) return send(res, 500, { error: 'could not build the report (see server.log)' });
+  fs.readFile(file, (err, data) => err ? send(res, 404, { error: 'no report' }) : send(res, 200, data, 'text/html; charset=utf-8', { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'" }));
+}
+// 23:00: write today's report; at startup: write yesterday's if it is missing (the PC was off at 23:00)
+function reportClock() {
+  const d = new Date(), today = dayKey(d.getTime());
+  if (d.getHours() === 23 && settings.lastAutoReport !== today) { settings.lastAutoReport = today; saveSettings(); buildReport(today); }
+}
+function reportCatchUp() {
+  const y = new Date(); y.setDate(y.getDate() - 1); const day = dayKey(y.getTime());
+  let st = null; try { st = fs.statSync(path.join(REPORTS, day + '.html')); } catch (e) {}
+  if (!st || st.mtimeMs < new Date(day + 'T23:59:59').getTime()) buildReport(day);   // missing, or the 23:00 one (not the whole day)
+}
+
 const cpu0 = { t: Date.now(), u: process.cpuUsage() };
 
 const server = http.createServer((req, res) => {
@@ -228,6 +265,13 @@ const server = http.createServer((req, res) => {
         uptimeS: Math.round(process.uptime()), lastMinute: { ticks: summarize(recentTicks), patchBytes: summarize(recentPatches), read: summarize(recentParts.read), build: summarize(recentParts.build), diff: summarize(recentParts.diff) }, engine: engine.memStats() });
     }
     if (url === '/api/settings') return send(res, 200, settings);
+    if (url === '/report') {
+      const q = new URLSearchParams(req.url.split('?')[1] || ''), day = q.get('date') || dayKey(Date.now());
+      if (!require('./report').validDate(day)) return send(res, 400, { error: 'date must be YYYY-MM-DD' });
+      serveReport(req, res, day, q.get('fresh') === '1').catch(e => send(res, 500, { error: String(e.message || e) }));
+      return;
+    }
+    if (url === '/api/reports') { let list = []; try { list = fs.readdirSync(REPORTS).filter(f => /^\d{4}-\d{2}-\d{2}\.html$/.test(f)).map(f => f.slice(0, 10)).sort().reverse(); } catch (e) {} return send(res, 200, list); }
     if (url === '/api/toasts') return send(res, 200, toastLog);
   } catch (e) { log('request error', url, e.stack || e); return send(res, 500, { error: String(e.message || e) }); }
 
@@ -252,6 +296,7 @@ server.listen(PORT, HOST, () => {
   tick('start');
   setupWatchers();
   git.start();
+  if (!process.env.AGENT_HQ_NO_AUTOREPORT) { setTimeout(reportCatchUp, 30000); setInterval(reportClock, 60000); }
   setInterval(() => scheduleTick('heartbeat', 0), 5000);                        // time-based rules (stuck, idle Codex)
   setInterval(upkeep, 60000);                                                   // today's stats file, pruning, compaction
   setInterval(() => { for (const c of clients) { try { c.write(': ping\n\n'); } catch (e) {} } }, 25000);

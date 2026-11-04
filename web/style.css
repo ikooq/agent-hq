@@ -138,3 +138,8 @@ footer { position: fixed; left: 12px; right: 12px; bottom: 10px; height: 78px; d
 .gitold { color: #e8851c; font: 600 12px var(--sans, inherit); white-space: nowrap; }
 .bc-foot .bc-code { margin-left: 6px; }
 .bc-grid dd.gitv { word-break: normal; overflow-wrap: anywhere; }
+.rp-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; font-size: 13px; }
+.rp-bar input { font: inherit; padding: 4px 6px; border: 1px solid var(--hair); border-radius: 8px; background: #fff; }
+.rp-bar a.hbtn { text-decoration: none; color: inherit; } .rp-bar .muted a { color: inherit; }
+.rp-wrap { position: relative; height: min(66vh, 720px); border-radius: 12px; overflow: hidden; border: 1px solid var(--hair); background: #faf7f2; }
+.rp-wrap iframe { width: 100%; height: 100%; border: 0; display: block; } .rp-wrap .empty { position: absolute; inset: 0; display: grid; place-items: center; }

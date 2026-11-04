@@ -147,6 +147,18 @@ const TL = E.timeline();
 const tlRow = id => TL.rows.find(r => r.botId === id);
 check('timeline: bars per bot (Tutor working, Nexus waiting)', tlRow('tutor').segments.some(s => s[2] === 'working') && tlRow('nexus').segments.some(s => s[2] === 'waiting') && tlRow('hq').segments.some(s => s[2] === 'resting'));
 
+// daily report (engine part + HTML), before the logs are deleted below
+{
+  const R = E.report(dayKey(NOW)), rb = id => R.bots.find(b => b.id === id) || {};
+  check('report: per bot files edited / commands run (LocQA edited server.js, Tutor ran npm run build)', rb('locqa').files === 1 && rb('tutor').commands === 1 && rb('locqa').tokens.total === expIn + expOut, JSON.stringify([rb('locqa').files, rb('tutor').commands]));
+  check('report: waited on me, got stuck (twice: silent 18 min, one line, silent again), tasks finished', rb('nexus').waits >= 1 && rb('nexus').waitSec > 0 && R.bots.some(b => b.dropIn && b.stuck === 2 && b.stuckSec > 0) && rb('hq').finished === 1 && R.totals.finished >= 1, JSON.stringify([rb('nexus').waits, rb('hq').finished]));
+  check('report: timeline segments + only bots with activity', rb('tutor').segments && rb('tutor').segments.some(x => x[2] === 'working') && !R.bots.some(b => b.id === 'gone' && !b.activeSec && !b.tokens.total), JSON.stringify(R.bots.map(b => b.id)));
+  const { writeReport } = require('./report');
+  const w = writeReport(dayKey(NOW), { home: HOME });
+  const html = fs.readFileSync(w.file, 'utf8');
+  check('report: ~/.agent-hq/reports/YYYY-MM-DD.html written, self-contained (no scripts, no external URLs)', path.resolve(w.file) === path.resolve(HQ, 'reports', dayKey(NOW) + '.html') && /LocQA/.test(html) && /Timeline/.test(html) && !/<script/i.test(html) && !/(src|href)=["']https?:/i.test(html));
+}
+
 // subagent stop + transcript deletion robustness
 fs.appendFileSync(path.join(HQ, `events-${monthKey(NOW)}.jsonl`), JSON.stringify({ time: iso(1), event: 'SubagentStop', session_id: 'loc', cwd: cwd('proj/locqa'), agent_id: 'abc123', agent_type: 'researcher', agent_transcript_path: path.join(subDir, 'agent-abc123.jsonl') }) + '\n');
 fs.unlinkSync(txp('nx2'));
@@ -341,7 +353,7 @@ async function gitChecks() {
 
 // ---------- hook + server (real processes, temp home, test port) ----------
 const PORT = 7791;
-const env = { ...process.env, USERPROFILE: HOME, HOME, AGENT_HQ_GIT_MS: '2000', AGENT_HQ_PORT: String(PORT), AGENT_HQ_NO_TOAST: '1', AGENT_HQ_DRYRUN_OPEN: '1' };
+const env = { ...process.env, USERPROFILE: HOME, HOME, AGENT_HQ_GIT_MS: '2000', AGENT_HQ_NO_AUTOREPORT: '1', AGENT_HQ_PORT: String(PORT), AGENT_HQ_NO_TOAST: '1', AGENT_HQ_DRYRUN_OPEN: '1' };
 const runHook = (input, extra = {}) => { const t0 = Date.now(); const r = spawnSync(process.execPath, [path.join(CODE, 'hook.js')], { input, env: { ...env, ...extra }, timeout: 5000 }); return { ms: Date.now() - t0, code: r.status }; };
 const bad = runHook('not json at all');
 check('hook: garbage input exits 0', bad.code === 0);
@@ -405,6 +417,10 @@ function req(method, p, { headers = {}, body } = {}) {
     for (let i = 0; i < 40 && !(gs && gs.git); i++) { const r = await req('GET', '/state'); gs = r.json && r.json.bots.find(b => b.id === 'nexus'); if (!(gs && gs.git)) await new Promise(r2 => setTimeout(r2, 250)); }
     check('server: git info on the bot in /state (background watcher)', gs && gs.git && gs.git.branch === 'main' && gs.git.changed === 2 && gs.git.unpushed === 1 && gs.git.dirtyOld, JSON.stringify(gs && gs.git));
   }
+  const rp = await new Promise(resolve => { const r = http.get({ host: '127.0.0.1', port: PORT, path: '/report?fresh=1', headers: { Host: `127.0.0.1:${PORT}` }, timeout: 60000 }, res => { let b = ''; res.on('data', d => b += d); res.on('end', () => resolve({ code: res.statusCode, csp: res.headers['content-security-policy'], b })); }); r.on('error', () => resolve({ code: 0 })); });
+  check('server: /report builds today\'s report in a child process (CSP: no scripts)', rp.code === 200 && /Agent HQ ·/.test(rp.b) && /default-src 'none'/.test(rp.csp || ''), rp.code + ' ' + String(rp.b).slice(0, 200));
+  const rbad = await req('GET', '/report?date=../../x');
+  check('server: /report rejects a bad date', rbad.code === 400);
   const pidFile = path.join(HQ, `server-${PORT}.pid`);
   check('server: PID file written', fs.existsSync(pidFile) && +fs.readFileSync(pidFile, 'utf8') === health.json.pid);
   const stop = spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'stop'], { env, encoding: 'utf8', timeout: 10000 });
