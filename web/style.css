@@ -134,3 +134,7 @@ footer { position: fixed; left: 12px; right: 12px; bottom: 10px; height: 78px; d
 
 @media (max-width: 1400px) { :root { --side-w: 300px; } .kpis { grid-template-columns: repeat(4, minmax(120px, 1fr)); } .kval { font-size: 19px; } .legend { grid-template-columns: repeat(2, auto); } .stage { min-width: 88px; } }
 @media (max-width: 1100px) { .brand { min-width: 0; } .brand .clock { display: none; } .ksub { display: none; } .legend { display: none; } .ptitle { display: none; } }
+
+.gitold { color: #e8851c; font: 600 12px var(--sans, inherit); white-space: nowrap; }
+.bc-foot .bc-code { margin-left: 6px; }
+.bc-grid dd.gitv { word-break: normal; overflow-wrap: anywhere; }

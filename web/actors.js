@@ -7,6 +7,14 @@ import { Builder, Billboards, billboardMaterial, atlasMaterial, botColor, STATUS
 const CAP = 64;
 const fmtTok = n => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n)); };
 const STATUS_CSS = { working: '#3fae7c', running: '#3f9fae', waiting: '#e39a2d', stuck: '#e0565f', resting: '#7d98df', off: '#9a94a6' };
+export const gitLine = g => [g.branch || '?', g.changed ? g.changed + ' changed' : 'clean', g.unpushed ? g.unpushed + ' unpushed' : null].filter(Boolean).join(' · ');
+// bottom strip of a desk monitor: "main · 3 changed · 1 unpushed"; orange dot when uncommitted work is older than 2 h
+function paintGit(g, W, H, git, sts) {
+  g.fillStyle = sts === 'off' ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.35)'; g.fillRect(0, H - 24, W, 24);
+  g.font = '600 14px Cascadia Mono, Consolas, monospace'; g.textBaseline = 'middle'; g.textAlign = 'left';
+  g.fillStyle = git.changed ? '#ffd9a0' : '#bfe8d2'; g.fillText('⎇ ' + gitLine(git), 8, H - 11, W - (git.dirtyOld ? 34 : 14));
+  if (git.dirtyOld) { g.fillStyle = '#ff9a2e'; g.beginPath(); g.arc(W - 14, H - 12, 7, 0, 7); g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 2; g.stroke(); }
+}
 const lerpAngle = (a, b, t) => { let d = b - a; d = Math.atan2(Math.sin(d), Math.cos(d)); return a + d * t; };
 const _m = new THREE.Matrix4(), _r = new THREE.Matrix4(), _p = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3(), _c = new THREE.Color();
 const Y = new THREE.Vector3(0, 1, 0);
@@ -62,7 +70,7 @@ export class Actors {
     // billboards: tags + chips (atlases), icons, glows, cards
     this.tags = new Billboards(billboardMaterial(world.atlases.tags.tex), CAP, 20);
     // model + token chips: flat plaques lying on each desk (depth-tested, never on top of robots or labels)
-    const cg = new THREE.PlaneGeometry(.78, .27); this.chipRect = new THREE.InstancedBufferAttribute(new Float32Array(CAP * 4), 4); cg.setAttribute('atlasRect', this.chipRect);
+    const cg = new THREE.PlaneGeometry(.78, .354); this.chipRect = new THREE.InstancedBufferAttribute(new Float32Array(CAP * 4), 4); cg.setAttribute('atlasRect', this.chipRect);
     this.chipMesh = inst(cg, atlasMaterial(new THREE.MeshBasicMaterial({ map: world.atlases.chips.tex, transparent: true, toneMapped: false, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })));
     this.chipMesh.renderOrder = 4;
     this.chipBB = new Billboards(billboardMaterial(world.atlases.chips.tex), 4, 19); G.add(this.chipBB.mesh);
@@ -294,7 +302,8 @@ export class Actors {
     this.placeTags(n);
     this.chipBB.begin(); this.chipBB.mesh.material.uniforms.pxScale.value = px;
     for (const k of [this.selected, this.hovered]) { const ag = k && this.agents.get(k); if (!ag || !ag.botId || (k === this.hovered && k === this.selected && ag !== this.agents.get(this.hovered))) continue;
-      const c = (this.chipList || []).find(x => x.botId === ag.botId); if (c && !(k === this.hovered && this.hovered === this.selected)) this.chipBB.push(c.x, .9, c.z, 150, 52, c.rect, 1, 1, 1, 1, 0, 10); }
+      const c = (this.chipList || []).find(x => x.botId === ag.botId); if (c && !(k === this.hovered && this.hovered === this.selected)) this.chipBB.push(c.x, .9, c.z, 150, 68, c.rect, 1, 1, 1, 1, 0, 10); }
+    if (this.selectedBot && !this.selected) { const c = (this.chipList || []).find(x => x.botId === this.selectedBot); if (c) this.chipBB.push(c.x, .9, c.z, 150, 68, c.rect, 1, 1, 1, 1, 0, 10); }   // off bot selected: show its plaque big
     this.chipBB.end();
     const up = (attr, count, size) => { if (!attr) return; attr.clearUpdateRanges(); attr.addUpdateRange(0, Math.max(1, count) * size); attr.needsUpdate = true; };
     for (const k of ['body', 'head', 'face', 'bulb', 'blob']) { m[k].count = n; up(m[k].instanceMatrix, n, 16); }
@@ -383,14 +392,16 @@ export class Actors {
       const timer = r && r.status === 'running' && r.runningSince ? Math.floor((Date.now() - r.runningSince) / 1000) : null;
       if (S.slots[i] == null || S.slots[i] < 0) S.slots[i] = this.w.atlases.screens.alloc();
       const slot = S.slots[i]; if (slot < 0) return;
-      const key = `${sts}|${r ? r.step : ''}|${timer}|${atDesk}`;
-      this.w.atlases.screens.draw(slot, key, (g, W, H) => this.paintScreen(g, W, H, b, r, sts, timer, atDesk));
+      const git = d.index === 0 ? b.git : null;   // git line on the bot's first desk
+      const key = `${sts}|${r ? r.step : ''}|${timer}|${atDesk}|${git ? gitLine(git) + git.dirtyOld : ''}`;
+      this.w.atlases.screens.draw(slot, key, (g, W, H) => { this.paintScreen(g, W, H, b, r, sts, timer, atDesk); if (git) paintGit(g, W, H, git, sts); });
       S.rect.array.set(this.w.atlases.screens.rect(slot), i * 4);
       // chip: model + tokens today (whole bot) on the first desk of each bot
       if (d.index === 0) {
         const cs = this.slotFor(this.chipSlots, d.botId, this.w.atlases.chips); if (cs < 0) return;
         const label = b.modelLabel, tok = b.tokens.total;
-        this.w.atlases.chips.draw(cs, `${label}|${fmtTok(tok)}|${b.team}|${Math.round(100 * tok / (this.maxTok || 1))}`, (g, W, H) => {
+        const old = !!(b.git && b.git.dirtyOld);
+        this.w.atlases.chips.draw(cs, `${label}|${fmtTok(tok)}|${b.team}|${Math.round(100 * tok / (this.maxTok || 1))}|${b.git ? gitLine(b.git) : ''}|${old}`, (g, W, H) => {
           const col = '#' + new THREE.Color(b.source === 'codex' ? 0x2fa39d : (TEAM_HEX[b.team] ?? 0x9a94a6)).getHexString();
           rr(g, 2, 2, W - 4, H - 4, 14); g.fillStyle = 'rgba(255,252,247,.96)'; g.fill(); g.lineWidth = 3; g.strokeStyle = col; g.stroke();
           let fs = 30; g.font = `800 ${fs}px Segoe UI, sans-serif`; while (g.measureText(label).width > W - 36 && fs > 18) { fs--; g.font = `800 ${fs}px Segoe UI, sans-serif`; }
@@ -398,6 +409,8 @@ export class Actors {
           g.fillStyle = '#fff'; g.textBaseline = 'middle'; g.textAlign = 'center'; g.fillText(label, W / 2, 30, W - 28);
           const maxT = this.maxTok || 1; g.fillStyle = 'rgba(80,60,100,.14)'; rr(g, 14, 64, W - 120, 12, 6); g.fill(); g.fillStyle = col; rr(g, 14, 64, Math.max(10, (W - 120) * Math.min(1, tok / maxT)), 12, 6); g.fill();
           g.fillStyle = '#3a3346'; g.font = '800 26px Segoe UI, sans-serif'; g.textAlign = 'right'; g.fillText(fmtTok(tok), W - 12, 71);
+          if (b.git) { g.fillStyle = b.git.changed ? '#b3651a' : '#3f8a66'; g.font = '700 17px Cascadia Mono, Consolas, monospace'; g.textAlign = 'left'; g.fillText('⎇ ' + gitLine(b.git), 14, 98, W - 28); }
+          if (old) { g.fillStyle = '#ff9a2e'; g.beginPath(); g.arc(W - 16, 16, 10, 0, 7); g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 3; g.stroke(); }   // uncommitted work older than 2 h
         });
         this.chipList.push({ botId: d.botId, x: d.desk.x + .45, z: d.desk.z + .26, rect: this.w.atlases.chips.rect(cs) });
       }
@@ -406,7 +419,7 @@ export class Actors {
     const key = this.chipList.map(c => c.x.toFixed(2) + c.z.toFixed(2) + c.rect.join()).join('|');
     if (key !== this.chipKey) {   // matrices change only with the layout
       this.chipKey = key;
-      this.chipList.forEach((c, i) => { _p.compose(_v.set(c.x, .86, c.z), FLAT, _s.set(1, 1, 1)); this.chipMesh.setMatrixAt(i, _p); this.chipRect.array.set(c.rect, i * 4); });
+      this.chipList.forEach((c, i) => { _p.compose(_v.set(c.x, .88, c.z), FLAT, _s.set(1, 1, 1)); this.chipMesh.setMatrixAt(i, _p); this.chipRect.array.set(c.rect, i * 4); });
       this.chipMesh.count = this.chipList.length; this.chipMesh.instanceMatrix.needsUpdate = true; this.chipRect.needsUpdate = true;
     }
   }
@@ -428,8 +441,8 @@ export class Actors {
     }
     g.fillStyle = '#f4f1ea'; g.font = '600 16px Cascadia Mono, Consolas, monospace';
     const words = String(sts === 'resting' && !atDesk ? 'on a break' : r.step).split(/\s+/); let line = '', y = 50;
-    for (const wd of words) { const tl = line ? line + ' ' + wd : wd; if (g.measureText(tl).width > W - 18 && line) { g.fillText(line, 9, y); y += 21; line = wd; if (y > H - 14) break; } else line = tl; }
-    if (y <= H - 14) g.fillText(line, 9, y);
+    for (const wd of words) { const tl = line ? line + ' ' + wd : wd; if (g.measureText(tl).width > W - 18 && line) { g.fillText(line, 9, y); y += 21; line = wd; if (y > H - 40) break; } else line = tl; }
+    if (y <= H - 40) g.fillText(line, 9, y);
   }
 
   // ---------- picking ----------

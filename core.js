@@ -611,7 +611,7 @@ function createEngine(opts = {}) {
       const model = (recent && recent.model) || b.model;
       const lastLine = Math.max(0, ...b.sessions.map(s => s.lastLine), ...b.subs.map(a => a.lastLine));
       out.push({ id: b.id, name: b.name, job: b.job, team: b.team, source: b.source, dropIn: b.dropIn, agentType: b.agentType,
-        canOpen: !!(b.folder && !b.dropIn), model, modelLabel: modelLabel(model, b.source), status, tokens, lastLine: lastLine || null, robots });
+        canOpen: !!(b.folder && !b.dropIn), git: !b.dropIn && opts.gitInfo ? opts.gitInfo(b.id) || null : null, model, modelLabel: modelLabel(model, b.source), status, tokens, lastLine: lastLine || null, robots });
 
       // activity feed (today): actions, approvals, arrivals/departures
       for (const s of [...b.sessions, ...b.subs]) {

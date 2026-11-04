@@ -22,6 +22,7 @@ const ICON = {
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11 12 3l9 8M5 9.5V21h14V9.5"/></svg>',
 };
+const gitText = g => [g.branch || '?', g.changed ? g.changed + ' changed' : 'clean', g.unpushed ? g.unpushed + ' unpushed' : null, g.behind ? g.behind + ' behind' : null].filter(Boolean).join(' · ');
 const setText = (el, v) => { v = String(v); if (el.textContent !== v) el.textContent = v; };
 const setAttr = (el, k, v) => { if (el.getAttribute(k) !== v) el.setAttribute(k, v); };
 const setStyle = (el, k, v) => { if (el.style[k] !== v) el.style[k] = v; };
@@ -173,7 +174,7 @@ export class UI {
     const t = this.target(); if (!t || !this.selected) return;
     const { b, r } = t; const st = r ? r.status : 'off';
     const tok = r ? r.tokens : b.tokens; const scope = r && b.robots.length > 1 ? 'this session' : 'whole bot';
-    const key = JSON.stringify([b.id, r && r.key, st, r && r.step, r && r.task, tok, r && r.actions && r.actions.length && r.actions[0].t, r && r.helpers]);
+    const key = JSON.stringify([b.id, b.git, r && r.key, st, r && r.step, r && r.task, tok, r && r.actions && r.actions.length && r.actions[0].t, r && r.helpers]);
     if (key === this.cardKey && Date.now() - (this.cardAt || 0) < 15000) return;
     this.cardKey = key; this.cardAt = Date.now();
     this.card.innerHTML = `
@@ -187,6 +188,7 @@ export class UI {
         <dl class="bc-grid"><dt>Team</dt><dd>${esc(b.team)}${b.source === 'codex' ? ' · Codex' : ' · Claude Code'}</dd>
           <dt>Model</dt><dd>${esc(r ? r.modelLabel : b.modelLabel)}</dd>
           <dt>Folder</dt><dd class="mono">${esc(r && r.kind === 'subagent' ? 'subagent: ' + r.agentType : (r && r.cwd) || '—')}</dd>
+          ${b.git ? `<dt>Git</dt><dd class="mono gitv">${esc(gitText(b.git))}${b.git.dirtyOld ? ` <span class="gitold" title="Uncommitted changes older than 2 hours">● since ${esc(ago(b.git.dirtySince))}</span>` : ''}</dd>` : ''}
           <dt>Session</dt><dd>${r ? `${dur(Date.now() - r.start)} <span class="muted">since ${hhmm(r.start)}</span>` : '—'}</dd>
           <dt>Last line</dt><dd>${r && r.lastLine ? `${hhmm(r.lastLine)} <span class="muted">${ago(r.lastLine)}</span>` : (b.lastLine ? ago(b.lastLine) : '—')}</dd></dl>
         <h3>Tokens today <span class="muted">(${scope})</span></h3>
@@ -197,13 +199,15 @@ export class UI {
         <h3>Last actions</h3>
         <ol class="bc-actions">${r && r.actions.length ? r.actions.map(a => `<li><time>${hhmm(a.t)}</time><span>${esc(a.text)}</span></li>`).join('') : '<li class="muted">No actions yet.</li>'}</ol>
       </div>
-      <div class="bc-foot"><button class="hbtn text bc-open" ${b.canOpen && !this.bench ? '' : 'disabled title="Only folders listed in roster.json can be opened"'}>Open folder</button><span class="bc-msg muted"></span></div>`;
+      <div class="bc-foot"><button class="hbtn text bc-open" ${b.canOpen && !this.bench ? '' : 'disabled title="Only folders listed in roster.json can be opened"'}>Open folder</button><button class="hbtn text bc-code" ${b.canOpen && !this.bench ? '' : 'disabled title="Only folders listed in roster.json can be opened"'}>Open in VS Code</button><span class="bc-msg muted"></span></div>`;
     this.card.querySelector('.bc-close').onclick = () => this.onSelect(null, null, true);
-    this.card.querySelector('.bc-open').onclick = async () => {
+    const open = app => async () => {
       const msg = this.card.querySelector('.bc-msg');
-      try { const res = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId: b.id }) }); const j = await res.json(); msg.textContent = res.ok ? 'Opened in Explorer' : (j.error || 'Could not open'); }
+      try { const res = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId: b.id, app }) }); const j = await res.json(); msg.textContent = res.ok ? (app === 'vscode' ? 'Opening VS Code…' : 'Opened in Explorer') : (j.error || 'Could not open'); }
       catch (e) { msg.textContent = 'Server offline'; }
     };
+    this.card.querySelector('.bc-open').onclick = open(null);
+    this.card.querySelector('.bc-code').onclick = open('vscode');
   }
 
   // ---------- insights: timeline + stats (v2 views, as tabs) ----------

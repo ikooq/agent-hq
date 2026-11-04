@@ -45,8 +45,8 @@ function apply(s, prev) {
   actors.sync(s);
   ui.update(s, prev);
 }
-function select(key, botId) { ui.select(key, botId); const a = key && actors.agentByRobotKey(key); actors.selected = a ? a.key : null; world.follow = a || null; }
-function deselect() { ui.closeCard(); actors.selected = null; world.follow = null; }
+function select(key, botId) { ui.select(key, botId); const a = key && actors.agentByRobotKey(key); actors.selected = a ? a.key : null; actors.selectedBot = botId || null; world.follow = a || null; }
+function deselect() { ui.closeCard(); actors.selected = null; actors.selectedBot = null; world.follow = null; }
 addEventListener('keydown', e => { if (e.key === 'Escape') { if (ui.modal.classList.contains('show')) ui.closeInsights(); else if (ui.cardOpen) deselect(); else world.home(); } });
 
 // ---------- data: first load via /state, then Server-Sent Events with only the changes ----------

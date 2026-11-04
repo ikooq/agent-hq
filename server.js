@@ -3,13 +3,14 @@
 //   GET /            the office            GET /state     full state (first load)
 //   GET /events      Server-Sent Events: only what changed (bots by id, counts, feed…)
 //   GET /timeline    GET /stats    GET /api/health    GET /api/settings
-//   POST /api/mute {muted}   POST /api/open {botId}   (same-origin JSON only)
+//   POST /api/mute {muted}   POST /api/open {botId, app?: 'vscode'}   (same-origin JSON only)
 // Files are read incrementally by byte offset; fs.watch (debounced) triggers refreshes,
 // plus a 5 s heartbeat for time-based rules (stuck after 10 min, idle Codex threads).
 'use strict';
 const http = require('http'), fs = require('fs'), path = require('path'), os = require('os');
 const { spawn } = require('child_process');
 const { createEngine } = require('./core');
+const { createGitWatcher } = require('./git');
 
 const HQ = path.join(os.homedir(), '.agent-hq');
 const HOST = '127.0.0.1';
@@ -19,7 +20,10 @@ const SETTINGS = path.join(HQ, 'settings.json');
 const ORIGINS = [`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`];
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
-const engine = createEngine({ readBudgetMs: 60 });   // each tick reads files for at most ~60 ms
+let git = null;
+const engine = createEngine({ readBudgetMs: 60, gitInfo: id => git && git.get(id) });   // each tick reads files for at most ~60 ms
+// git status of roster folders: background child processes, at most once a minute per folder; a change triggers a tick
+git = createGitWatcher({ roster: () => engine.roster(), expand: p => engine.expand(p), intervalMs: +process.env.AGENT_HQ_GIT_MS || 60000, onChange: () => scheduleTick('git'), log });
 let settings = { muted: false };
 try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS, 'utf8')) }; } catch (e) {}
 const saveSettings = () => { try { fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2)); } catch (e) {} };
@@ -167,13 +171,22 @@ function readBody(req, cb) {
   req.on('data', d => { b += d; if (b.length > 4096) req.destroy(); });
   req.on('end', () => { try { cb(JSON.parse(b || '{}')); } catch (e) { cb(null); } });
 }
-function openFolder(botId) {
+// Only the first folder of a roster bot can be opened (in Explorer, or VS Code with app: 'vscode').
+function openFolder(botId, app) {
   const bot = (engine.roster().bots || []).find(b => (b.id || b.name) === botId);
   if (!bot || !(bot.folders || []).length) return { code: 404, body: { error: 'not a roster bot with a folder' } };
   const dir = path.resolve(engine.expand(bot.folders[0]));
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return { code: 404, body: { error: 'folder not found', dir } };
+  if (app === 'vscode') {
+    // `code` is a .cmd on Windows, which Node only starts through a shell: refuse anything a shell could read as syntax
+    if (/["%^&|<>!`$\r\n]/.test(dir)) return { code: 400, body: { error: "folder path has characters that cannot be passed to VS Code safely", dir } };
+    if (!process.env.AGENT_HQ_DRYRUN_OPEN) {
+      try { spawn(process.platform === 'win32' ? 'code.cmd' : 'code', [`"${dir}"`], { shell: true, detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => {}).unref(); } catch (e) { return { code: 500, body: { error: 'could not start VS Code' } }; }
+    }
+    return { code: 200, body: { ok: true, opened: dir, app: 'vscode' } };
+  }
   if (!process.env.AGENT_HQ_DRYRUN_OPEN) {
-    try { spawn('explorer.exe', [dir], { detached: true, stdio: 'ignore', windowsHide: false }).on('error', () => {}).unref(); } catch (e) {}
+    try { spawn(process.platform === 'win32' ? 'explorer.exe' : (process.platform === 'darwin' ? 'open' : 'xdg-open'), [dir], { detached: true, stdio: 'ignore', windowsHide: false }).on('error', () => {}).unref(); } catch (e) {}
   }
   return { code: 200, body: { ok: true, opened: dir } };
 }
@@ -189,7 +202,7 @@ const server = http.createServer((req, res) => {
     return readBody(req, body => {
       if (!body) return send(res, 400, { error: 'bad json' });
       if (url === '/api/mute') { settings.muted = !!body.muted; saveSettings(); return send(res, 200, settings); }
-      if (url === '/api/open') { const r = openFolder(String(body.botId || '')); return send(res, r.code, r.body); }
+      if (url === '/api/open') { const r = openFolder(String(body.botId || ''), body.app === 'vscode' ? 'vscode' : null); return send(res, r.code, r.body); }
       return send(res, 404, { error: 'not found' });
     });
   }
@@ -238,6 +251,7 @@ server.listen(PORT, HOST, () => {
   engine.scanCodex();
   tick('start');
   setupWatchers();
+  git.start();
   setInterval(() => scheduleTick('heartbeat', 0), 5000);                        // time-based rules (stuck, idle Codex)
   setInterval(upkeep, 60000);                                                   // today's stats file, pruning, compaction
   setInterval(() => { for (const c of clients) { try { c.write(': ping\n\n'); } catch (e) {} } }, 25000);

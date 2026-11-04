@@ -197,7 +197,7 @@ export class World {
     this.atlases = {
       screens: new Atlas(this.renderer, 2048, 1024, 256, 160),   // 48 desks
       tags: new Atlas(this.renderer, 1024, 1024, 256, 64),
-      chips: new Atlas(this.renderer, 1024, 1024, 256, 88),
+      chips: new Atlas(this.renderer, 1024, 2048, 256, 116),   // model + tokens (+ git line) plaques
       tasks: new Atlas(this.renderer, 2048, 1024, 512, 64),      // task cards above working robots
     };
     this.icons = this.iconAtlas();

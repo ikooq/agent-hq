@@ -310,9 +310,38 @@ async function layoutChecks() {
     && placeFor({ status: 'working', inMeeting: true }) === 'meeting' && placeFor({ status: 'working', leaving: true }) === 'door');
 }
 
+// ---------- git on desks (real temp repos: a bare "origin" + a working copy) ----------
+const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 'hq', GIT_AUTHOR_EMAIL: 'hq@example.invalid', GIT_COMMITTER_NAME: 'hq', GIT_COMMITTER_EMAIL: 'hq@example.invalid', GIT_CONFIG_NOSYSTEM: '1' };
+const git = (dir, ...a) => spawnSync('git', ['-c', 'init.defaultBranch=main', '-c', 'core.autocrlf=false', ...a], { cwd: dir, env: gitEnv, encoding: 'utf8' });
+const HAVE_GIT = spawnSync('git', ['--version']).status === 0;
+function makeRepo(dir, { remote, unpushed = 0, dirtyOldFile = false, untracked = false } = {}) {
+  fs.mkdirSync(dir, { recursive: true }); git(dir, 'init', '-q');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'one'); git(dir, 'add', '.'); git(dir, 'commit', '-qm', 'first');
+  if (remote) { fs.mkdirSync(path.dirname(remote), { recursive: true }); git(path.dirname(remote), 'init', '-q', '--bare', remote); git(dir, 'remote', 'add', 'origin', remote); git(dir, 'push', '-q', '-u', 'origin', 'main'); }
+  for (let i = 0; i < unpushed; i++) { fs.writeFileSync(path.join(dir, 'c' + i + '.txt'), 'x'); git(dir, 'add', '.'); git(dir, 'commit', '-qm', 'c' + i); }
+  if (dirtyOldFile) { fs.writeFileSync(path.join(dir, 'a.txt'), 'changed'); const old = (Date.now() - 3 * 3600000) / 1000; fs.utimesSync(path.join(dir, 'a.txt'), old, old); }
+  if (untracked) fs.writeFileSync(path.join(dir, 'new file.txt'), 'u');
+}
+if (HAVE_GIT) makeRepo(cwd('proj/nexus'), { remote: path.join(HOME, 'remotes', 'nexus.git'), unpushed: 1, dirtyOldFile: true, untracked: true });
+async function gitChecks() {
+  const { gitStatus, parseStatus } = require('./git');
+  if (!HAVE_GIT) { console.log('SKIP  git checks (git not installed)'); return; }
+  const g = await gitStatus(cwd('proj/nexus'));
+  check('git: branch, uncommitted files (incl. untracked with spaces), unpushed commits', g && g.branch === 'main' && g.changed === 2 && g.unpushed === 1 && g.upstream === 'origin/main', JSON.stringify(g));
+  check('git: uncommitted work older than 2 h -> orange dot (dirtyOld)', g && g.dirtyOld === true && g.dirtySince < Date.now() - 2 * 3600000);
+  const local = path.join(HOME, 'proj', 'localonly'); makeRepo(local, { unpushed: 2 });
+  const gl = await gitStatus(local);
+  check('git: no upstream -> commits not on any remote count as unpushed; clean tree', gl && gl.changed === 0 && gl.unpushed === 3 && gl.dirtyOld === false, JSON.stringify(gl));
+  check('git: a folder that is not a repo gives null', (await gitStatus(cwd('proj/tutor'))) === null);
+  const p = parseStatus(['# branch.oid abc', '# branch.head feat/x', '# branch.upstream origin/feat/x', '# branch.ab +3 -1', '2 R. N... 100644 100644 100644 aaa bbb R100 new name.js', 'old name.js', 'u UU N... 100644 100644 100644 100644 a b c conflict.js', ''].join('\0'));
+  check('git: porcelain v2 parse (rename + conflict, ahead/behind)', p.branch === 'feat/x' && p.ahead === 3 && p.behind === 1 && p.changed === 2 && p.files[0] === 'new name.js' && p.files[1] === 'conflict.js', JSON.stringify(p));
+  const before = git(cwd('proj/nexus'), 'status', '--porcelain').stdout;
+  check('git: status is read-only (no index.lock left, worktree unchanged)', !fs.existsSync(path.join(cwd('proj/nexus'), '.git', 'index.lock')) && before.split('\n').filter(Boolean).length === 2);
+}
+
 // ---------- hook + server (real processes, temp home, test port) ----------
 const PORT = 7791;
-const env = { ...process.env, USERPROFILE: HOME, HOME, AGENT_HQ_PORT: String(PORT), AGENT_HQ_NO_TOAST: '1', AGENT_HQ_DRYRUN_OPEN: '1' };
+const env = { ...process.env, USERPROFILE: HOME, HOME, AGENT_HQ_GIT_MS: '2000', AGENT_HQ_PORT: String(PORT), AGENT_HQ_NO_TOAST: '1', AGENT_HQ_DRYRUN_OPEN: '1' };
 const runHook = (input, extra = {}) => { const t0 = Date.now(); const r = spawnSync(process.execPath, [path.join(CODE, 'hook.js')], { input, env: { ...env, ...extra }, timeout: 5000 }); return { ms: Date.now() - t0, code: r.status }; };
 const bad = runHook('not json at all');
 check('hook: garbage input exits 0', bad.code === 0);
@@ -334,6 +363,7 @@ function req(method, p, { headers = {}, body } = {}) {
 }
 (async () => {
   try { await layoutChecks(); } catch (e) { check('layout/nav modules load in Node', false, e.message); }
+  try { await gitChecks(); } catch (e) { check('git checks ran', false, e.stack); }
   let health = null;
   for (let i = 0; i < 40 && !(health && health.json); i++) { await new Promise(r => setTimeout(r, 150)); health = await req('GET', '/api/health'); }
   check('autostart: SessionStart hook spawned the server', health && health.json && health.json.ok && path.resolve(health.json.hq) === path.resolve(HQ), JSON.stringify(health && health.json));
@@ -366,6 +396,15 @@ function req(method, p, { headers = {}, body } = {}) {
   check('open-folder: unknown bot refused', o2.code === 404);
   const o3 = await req('POST', '/api/open', { headers: { ...json, Origin: `http://127.0.0.1:${PORT}` }, body: '{"botId":"nexus"}' });
   check('open-folder: roster folder allowed (dry run)', o3.code === 200 && o3.json && path.resolve(o3.json.opened) === path.resolve(cwd('proj/nexus')));
+  const o4 = await req('POST', '/api/open', { headers: { ...json, Origin: `http://127.0.0.1:${PORT}` }, body: '{"botId":"nexus","app":"vscode"}' });
+  check('open in VS Code: roster folder allowed (dry run)', o4.code === 200 && o4.json && o4.json.app === 'vscode' && path.resolve(o4.json.opened) === path.resolve(cwd('proj/nexus')));
+  const o5 = await req('POST', '/api/open', { headers: { ...json, Origin: `http://127.0.0.1:${PORT}` }, body: '{"botId":"researcher","app":"vscode"}' });
+  check('open in VS Code: bot without a folder refused', o5.code === 404);
+  if (HAVE_GIT) {
+    let gs = null;
+    for (let i = 0; i < 40 && !(gs && gs.git); i++) { const r = await req('GET', '/state'); gs = r.json && r.json.bots.find(b => b.id === 'nexus'); if (!(gs && gs.git)) await new Promise(r2 => setTimeout(r2, 250)); }
+    check('server: git info on the bot in /state (background watcher)', gs && gs.git && gs.git.branch === 'main' && gs.git.changed === 2 && gs.git.unpushed === 1 && gs.git.dirtyOld, JSON.stringify(gs && gs.git));
+  }
   const pidFile = path.join(HQ, `server-${PORT}.pid`);
   check('server: PID file written', fs.existsSync(pidFile) && +fs.readFileSync(pidFile, 'utf8') === health.json.pid);
   const stop = spawnSync(process.execPath, [path.join(CODE, 'cli.js'), 'stop'], { env, encoding: 'utf8', timeout: 10000 });
