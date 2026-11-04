@@ -434,7 +434,7 @@ export class World {
 
   // ---------- time of day ----------
   setHourMode(mode) { this.hourMode = mode; localStorage.setItem('hq-tod', mode); this.updateSky(true); }
-  currentHour() { const d = new Date(); return { now: d.getHours() + d.getMinutes() / 60, day: 12, evening: 18.4, night: 22.5 }[this.hourMode] ?? 12; }
+  currentHour() { if (this.hourOverride != null) return this.hourOverride; const d = new Date(); return { now: d.getHours() + d.getMinutes() / 60, day: 12, evening: 18.4, night: 22.5 }[this.hourMode] ?? 12; }
   updateSky(force) {
     const h = this.currentHour();
     if (!force && this.lastHour != null && Math.abs(h - this.lastHour) < 1 / 60) return;

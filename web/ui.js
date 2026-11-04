@@ -29,8 +29,8 @@ const setStyle = (el, k, v) => { if (el.style[k] !== v) el.style[k] = v; };
 const h = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 
 export class UI {
-  constructor({ world, actors, onSelect, onHome, botColorCss, bench }) {
-    this.world = world; this.actors = actors; this.onSelect = onSelect; this.onHome = onHome; this.colorOf = botColorCss; this.bench = bench;
+  constructor({ world, actors, onSelect, onHome, botColorCss, bench, demo }) {
+    this.world = world; this.actors = actors; this.onSelect = onSelect; this.onHome = onHome; this.colorOf = botColorCss; this.bench = bench; this.isDemo = !!demo;
     this.state = null; this.selected = null; this.rows = new Map(); this.feedKeys = [];
     this.muted = localStorage.getItem('hq-muted') === '1'; this.mutedSynced = false;
     // KPI cards
@@ -44,7 +44,9 @@ export class UI {
     this.btnHome = h('button', 'hbtn', ICON.home); this.btnHome.title = 'Fit the whole office (Esc)'; this.btnHome.onclick = () => onHome();
     this.btnMute = h('button', 'hbtn'); this.btnMute.onclick = () => { this.muted = !this.muted; localStorage.setItem('hq-muted', this.muted ? '1' : '0'); this.paintMute(); this.pushMute(); this.unlockAudio(); };
     this.btnPhone = h('button', 'hbtn text', `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span>Phone</span>`); this.btnPhone.hidden = true; this.btnPhone.title = 'LAN mode is on: link + QR code for your phone'; this.btnPhone.onclick = () => this.openPhone();
-    $('hbtns').append(this.btnPhone, this.btnInsights, this.btnHome, this.btnMute); this.paintMute();
+    this.btnRec = h('button', 'hbtn text rec'); this.btnRec.onclick = () => this.toggleRecord(); this.paintRecord(false);
+    $('hbtns').append(this.btnRec, this.btnPhone, this.btnInsights, this.btnHome, this.btnMute); this.paintMute();
+    setInterval(() => { if (this.recorder && this.recorder.active) this.paintRecord(true, this.recorder); }, 1000);
     $('phone').addEventListener('click', e => { if (e.target.id === 'phone' || e.target.closest('.m-close')) $('phone').classList.remove('show'); });
     // bottom: time of day + quality
     const tod = $('tod');
@@ -70,9 +72,17 @@ export class UI {
     this.card = $('card'); this.modal = $('insights');
     this.modal.addEventListener('click', e => { if (e.target === this.modal) this.closeInsights(); });
     addEventListener('pointerdown', () => this.unlockAudio(), { once: true });
-    setInterval(() => { const n = new Date(); setText($('clock'), n.toLocaleTimeString('en-GB', { hour12: false })); setText($('date'), n.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })); }, 1000);
+    setInterval(() => { const n = new Date(); if (this.demoClock != null) { const hh = Math.floor(this.demoClock), mm = Math.floor((this.demoClock - hh) * 60); setText($('clock'), `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`); setText($('date'), 'Demo day · fake agents'); return; } setText($('clock'), n.toLocaleTimeString('en-GB', { hour12: false })); setText($('date'), n.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })); }, 250);
   }
 
+  // ---------- record (WebM of the office incl. panels) ----------
+  paintRecord(on, rec) {
+    const secs = on && rec ? Math.floor((performance.now() - rec.startedAt) / 1000) : 0;
+    this.btnRec.innerHTML = on ? `<i class="recdot"></i><span>Stop · ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}</span>` : '<i class="recdot idle"></i><span>Record</span>';
+    this.btnRec.classList.toggle('on', !!on);
+    this.btnRec.title = on ? `Recording (${rec && rec.mode === 'tab' ? 'this tab' : 'office + panels'}). Click to stop and download the WebM` : 'Record the office (3D + panels) to a WebM video';
+  }
+  async toggleRecord() { if (!this.recorder) return; if (this.recorder.active) await this.recorder.stop(); else await this.recorder.start(); }
   // ---------- notifications ----------
   paintMute() { this.btnMute.innerHTML = this.muted ? ICON.bellOff : ICON.bell; this.btnMute.classList.toggle('on', this.muted); this.btnMute.title = this.muted ? 'Muted (click to unmute)' : 'Chime + Windows toasts on (click to mute)'; }
   async pushMute() { if (this.bench) return; try { await fetch('/api/mute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ muted: this.muted }) }); } catch (e) {} }
@@ -158,6 +168,7 @@ export class UI {
   }
   async decide(id, decision, btn) {
     const box = btn.closest('.appr'), msg = box && box.querySelector('.appr-msg');
+    if (this.demo) { this.demo.decide(id, decision); if (msg) msg.textContent = decision === 'allow' ? 'Allowed once (demo)' : 'Denied (demo)'; return; }
     for (const b of box ? box.querySelectorAll('button') : []) b.disabled = true;
     try {
       const tok = await this.token();

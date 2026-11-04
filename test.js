@@ -314,6 +314,21 @@ async function layoutChecks() {
   const nd = L2.desks.find(d => d.botId === 'newbie'), vz = L2.zones.find(z => z.team === 'Visuals');
   check('layout: a new roster bot gets a desk in its team zone', nd && nd.desk.x > vz.x0 && nd.desk.x < vz.x1 && nd.desk.z > vz.z0 && nd.desk.z < vz.z1 && L2.desks.length === L.desks.length + 1);
   const G2 = new NavGrid(L2); check('layout: the new desk is reachable', !!G2.path(L2.spawn, nd.seat));
+  // demo mode: the scripted 90 s day, on a fake clock; fetch throws, so any server call would fail the check
+  {
+    let fake = 0; const realPerf = globalThis.performance, realFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, 'performance', { value: { now: () => fake }, configurable: true, writable: true });
+    let fetched = 0; globalThis.fetch = () => { fetched++; throw new Error('no network in demo'); };
+    try {
+      const { createDemo } = await import('file:///' + path.join(CODE, 'web', 'demo.js').replace(/\\/g, '/'));
+      const world = { hourOverride: null }, seen = { waiting: 0, stuck: 0, running: 0, approvals: 0, meeting: 0 }, hours = []; let last = null;
+      const demo = createDemo({ world, apply: st => { last = st; for (const k of ['waiting', 'stuck']) seen[k] = Math.max(seen[k], st.counts[k]); seen.running = Math.max(seen.running, st.bots.filter(x => x.status === 'running').length); seen.approvals = Math.max(seen.approvals, st.approvals.length); seen.meeting = Math.max(seen.meeting, ...st.bots.map(x => x.robots[0] ? x.robots[0].helpers.length : 0)); } });
+      for (fake = 0; fake <= 90000; fake += 500) { demo.tick(); hours.push(world.hourOverride); }
+      check('demo: 6 fake agents arrive, run commands, one waits at the kiosk (approval), one gets stuck, helpers meet', last.bots.length === 6 && seen.waiting === 1 && seen.stuck === 1 && seen.running >= 2 && seen.approvals === 1 && seen.meeting >= 2, JSON.stringify(seen));
+      check('demo: by the end everybody finished and rests (9 cards for the Done board); day turns into night', last.finished.length === 9 && last.bots.every(x => x.status === 'resting') && hours[0] === 8 && hours[hours.length - 1] === 23 && last.demo === true, JSON.stringify({ fin: last.finished.length, st: last.bots.map(x => x.status), h: [hours[0], hours[hours.length - 1]] }));
+      check('demo: uses no real data (no fetch, fake names only)', fetched === 0 && !last.bots.some(x => /nexus|locqa|tutor|scratch|hq/i.test(x.id)));
+    } finally { Object.defineProperty(globalThis, 'performance', { value: realPerf, configurable: true, writable: true }); globalThis.fetch = realFetch; }
+  }
   const { placeFor } = await import('file:///' + path.join(CODE, 'web', 'behavior.js').replace(/\\/g, '/'));
   check('behaviour: a new session (SessionStart, no prompt yet) walks straight to its desk, not the lounge', placeFor({ status: 'resting', turn: null }) === 'desk');
   check('behaviour: after Stop (prompted, then finished) it rests in the lounge', placeFor({ status: 'resting', turn: { requested: 1, done: 2 } }) === 'lounge');

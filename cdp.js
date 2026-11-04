@@ -13,7 +13,7 @@ const CHROME_PATHS = [
 ].filter(Boolean);
 const sleep = n => new Promise(r => setTimeout(r, n));
 
-async function launch({ width = 1920, height = 1080, gpu = true, headless = true } = {}) {
+async function launch({ width = 1920, height = 1080, gpu = true, headless = true, args: extra = [] } = {}) {
   const exe = CHROME_PATHS.find(p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } });
   if (!exe) throw new Error('Chrome/Edge not found (set CHROME_PATH)');
   const port = 9300 + Math.floor(Math.random() * 400);
@@ -23,6 +23,7 @@ async function launch({ width = 1920, height = 1080, gpu = true, headless = true
     '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--enable-precise-memory-info',
     '--disable-frame-rate-limit=false', 'about:blank'];
   if (headless) args.unshift('--headless=new');
+  args.unshift(...extra);
   if (gpu) args.unshift('--ignore-gpu-blocklist', '--enable-gpu-rasterization', '--use-angle=d3d11');
   else args.unshift('--use-angle=swiftshader', '--enable-unsafe-swiftshader');
   const proc = spawn(exe, args, { stdio: 'ignore' });

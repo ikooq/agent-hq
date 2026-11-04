@@ -182,3 +182,9 @@ body.mobile #card { top: 0; bottom: 0; right: 0; left: 0; width: auto; border-ra
 body.mobile .kiosk { position: fixed; transform: none !important; left: 8px; right: 8px; bottom: 8px; top: auto; width: auto; }
 html.mobile { overflow-y: auto; height: auto; } html.mobile body { height: auto; min-height: 100%; }
 body.mobile .kpis { flex: 1 0 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); } body.mobile .kpi { min-width: 0; } body.mobile .klabel { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } body.mobile #scene { height: 42vh; }
+
+/* record button */
+.hbtn.rec .recdot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #e0565f; margin-right: 2px; } .hbtn.rec .recdot.idle { background: #c9a3a6; }
+.hbtn.rec.on { background: #e0565f; color: #fff; } .hbtn.rec.on .recdot { background: #fff; animation: recblink 1s steps(2) infinite; }
+@keyframes recblink { 50% { opacity: .2; } }
+body.demo #conn { color: #a06a1c; }

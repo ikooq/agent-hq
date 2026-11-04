@@ -6,19 +6,24 @@ import { Actors } from '/web/actors.js';
 import { computeLayout, layoutKey } from '/web/layout.js';
 import { NavGrid } from '/web/nav.js';
 import { UI } from '/web/ui.js';
+import { createDemo } from '/web/demo.js';
+import { Recorder } from '/web/recorder.js';
 
 const params = new URLSearchParams(location.search);
 const BENCH = params.has('bench');
-const SOAK = params.has('soak');          // `agent-hq soak`: render every frame (like bench) but with live server data
+const SOAK = params.has('soak');
+const DEMO = params.has('demo');          // ?demo=1: scripted 90 s day with fake agents (no real data)          // `agent-hq soak`: render every frame (like bench) but with live server data
 const perf = new Perf();
 const world = new World(document.getElementById('scene'), { perf, bench: BENCH, onPick: ndc => { const a = actors.pick(ndc); if (a && a.r) select(a.r.key, a.botId); else if (a && a.kind === 'helper' && a.parent) select(a.parent.r.key, a.parent.botId); } });
 const actors = new Actors(world);
 const colorCss = b => '#' + botColor(b, 0).getHexString();
-const ui = new UI({ world, actors, bench: BENCH, botColorCss: colorCss, onSelect: (key, botId, close) => close ? deselect() : select(key, botId), onHome: () => { deselect(); world.home(); } });
+const ui = new UI({ world, actors, bench: BENCH || DEMO, demo: DEMO, botColorCss: colorCss, onSelect: (key, botId, close) => close ? deselect() : select(key, botId), onHome: () => { deselect(); world.home(); } });
 if (params.has('tod')) world.setHourMode(params.get('tod'));
 let hoverAt = 0;
 world.renderer.domElement.addEventListener('pointermove', e => { if (e.buttons || performance.now() - hoverAt < 80) return; hoverAt = performance.now(); const a = actors.pick(world.ndc(e)); const k = a && a.kind !== 'lead' ? (a.kind === 'helper' && a.parent ? a.parent.key : a.key) : null; if (k !== actors.hovered) { actors.hovered = k; world.lastMove = performance.now(); } world.renderer.domElement.style.cursor = k ? 'pointer' : ''; });
-window.__hq = { world, actors, ui, get state() { return state; }, apply: (s, prev) => { const p = state; state = s; apply(s, prev || p); } };
+const recorder = new Recorder({ world, getState: () => state, onChange: on => ui.paintRecord(on, recorder) });
+ui.recorder = recorder;
+window.__hq = { world, actors, ui, recorder, get state() { return state; }, apply: (s, prev) => { const p = state; state = s; apply(s, prev || p); } };
 
 let state = null, layoutSig = '';
 const MOBILE = params.has('m') || matchMedia('(max-width: 760px)').matches;
@@ -177,7 +182,7 @@ function loop(now) {
     else { const t = world.controls.target, dx = (a.pos.x - t.x) * Math.min(1, dt * 4), dz = (a.pos.z - t.z) * Math.min(1, dt * 4); t.x += dx; t.z += dz; world.camera.position.x += dx; world.camera.position.z += dz; if (Math.abs(dx) + Math.abs(dz) > .001) world.lastMove = now; }
   }
   world.controls.update(); world.clampTarget();
-  const active = BENCH || SOAK || walking || now - world.lastMove < 400;
+  const active = BENCH || SOAK || recorder.active || walking || now - world.lastMove < 400;
   if (!active && now - lastRender < 31) return;                  // idle: ~30 fps
   if (BENCH && params.has('paced') && now - lastRender < 16.2) return;   // optional 60 Hz pacing
   if (!active) perf.idle();
@@ -185,6 +190,7 @@ function loop(now) {
   actors.render(clock.t, now);
   if (world.needsCompile) { world.needsCompile = false; const t0 = performance.now(); world.renderer.compileAsync(world.scene, world.camera).then(() => { perf.compileMs = performance.now() - t0; }).catch(() => {}); }
   world.renderer.render(world.scene, world.camera);
+  if (recorder.compG) recorder.frame();
   perf.frame(now, world.renderer);
   perf.work = performance.now() - cbStart; if (benchFrame) workTimes.push(perf.work);
   if (SOAK) { soak.dts.push(now - (soak.lastF || now)); soak.lastF = now; soak.work += perf.work; if (world.qualityLevel !== soak.q) { if (soak.q != null) soak.qChanges++; soak.q = world.qualityLevel; } }
@@ -195,5 +201,8 @@ function loop(now) {
 }
 perf.extra = () => `\nquality ${world.quality.mode}:${world.qualityLevel}  pr ${world.renderer.getPixelRatio()}\natlas uploads ${Object.values(world.atlases).reduce((a, x) => a + x.uploads, 0)}\nlast patch ${perf.lastPatchMs ? perf.lastPatchMs.toFixed(1) : '-'} ms  build ${perf.lastBuildMs ? perf.lastBuildMs.toFixed(0) : '-'} ms`;
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { last = performance.now(); requestAnimationFrame(loop); } });
-if (BENCH) { benchFrame = runBench(); document.body.classList.add('bench'); } else if (params.has('nolive')) loadState(); else connect();
+let demo = null;
+if (BENCH) { benchFrame = runBench(); document.body.classList.add('bench'); }
+else if (DEMO) { document.body.classList.add('demo'); demo = createDemo({ apply: (s, prev) => { state = s; apply(s, prev); }, world, ui }); ui.demo = demo; conn.textContent = 'demo · fake agents'; demo.start(); }
+else if (params.has('nolive')) loadState(); else connect();
 requestAnimationFrame(loop);
