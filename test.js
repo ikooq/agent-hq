@@ -221,7 +221,7 @@ check('stats: busiest bot today', ST.busiestToday && ST.busiestToday.botId === '
   count += 200;
   // two copies of the same home: A keeps everything (old behaviour), B prunes + compacts
   const MEM2 = MEM + '-b'; fs.cpSync(MEM, MEM2, { recursive: true });
-  const fixHome = (src, dst) => { for (const f of fs.readdirSync(path.join(dst, '.agent-hq'))) if (/^events-/.test(f)) { const p = path.join(dst, '.agent-hq', f); fs.writeFileSync(p, fs.readFileSync(p, 'utf8').split(src).join(dst).split(src.replace(/\\/g, '\\\\')).join(dst.replace(/\\/g, '\\\\'))); } };
+  const fixHome = (src, dst) => { for (const f of fs.readdirSync(path.join(dst, '.agent-hq'))) if (/^events-/.test(f)) { const p = path.join(dst, '.agent-hq', f); let t = fs.readFileSync(p, 'utf8').split(src).join(dst); if (src.includes('\\')) t = t.split(src.replace(/\\/g, '\\\\')).join(dst.replace(/\\/g, '\\\\')); fs.writeFileSync(p, t); } };   // the JSON-escaped form exists only with backslashes; on POSIX a second pass would rewrite dst again
   fixHome(MEM, MEM2);
   const warmUp = E => { for (let i = 0; i < 200; i++) { E.tick(); if (!E.backlog()) break; } };
   const EA = createEngine({ home: MEM, now: () => T }); warmUp(EA); EA.persistStats(true);
