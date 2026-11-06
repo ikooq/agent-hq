@@ -1,0 +1,31 @@
+{
+  "teams": ["Research", "Content", "Visuals", "Ops", "Codex"],
+  "dropIn": { "team": "Ops", "job": "Session in a folder that is not on the roster", "model": "claude-opus-5-5" },
+  "dropInCodex": { "team": "Codex", "job": "Codex thread in a folder that is not on the roster", "model": "gpt-6.1-sol" },
+  "bots": [
+    { "id": "hq", "name": "HQ", "team": "Ops", "model": "claude-opus-5-5", "source": "claude", "match": "exact",
+      "job": "Sessions started in your home folder", "folders": ["~"] },
+    { "id": "website", "name": "Website", "team": "Visuals", "model": "claude-opus-5-5", "source": "claude",
+      "job": "Marketing site and landing pages", "folders": ["~/projects/website"] },
+    { "id": "api", "name": "API", "team": "Ops", "model": "claude-opus-5-5", "source": "claude",
+      "job": "Backend service, auth and deploys", "folders": ["~/projects/api"] },
+    { "id": "docs", "name": "Docs", "team": "Content", "model": "claude-sonnet-5-5", "source": "claude",
+      "job": "Documentation and release notes", "folders": ["~/projects/docs"] },
+    { "id": "research", "name": "Research", "team": "Research", "model": "claude-sonnet-5-5", "source": "claude",
+      "job": "Notes, experiments and comparisons", "folders": ["~/projects/research"] },
+
+    { "id": "researcher", "name": "Researcher", "team": "Research", "model": "claude-sonnet-5-5", "source": "claude", "agentType": "researcher",
+      "job": "Subagent: digs through docs, the web and the codebase", "folders": [] },
+    { "id": "writer", "name": "Writer", "team": "Content", "model": "claude-opus-5-5", "source": "claude", "agentType": "writer",
+      "job": "Subagent: READMEs, docs and posts", "folders": [] },
+    { "id": "designer", "name": "Designer", "team": "Visuals", "model": "claude-opus-5-5", "source": "claude", "agentType": "designer",
+      "job": "Subagent: UI from mockups and screenshots", "folders": [] },
+    { "id": "reviewer", "name": "Reviewer", "team": "Ops", "model": "claude-sonnet-5-5", "source": "claude", "agentType": "reviewer",
+      "job": "Subagent: reviews changes before a commit", "folders": [] },
+
+    { "id": "cx-api", "name": "Codex API", "team": "Codex", "model": "gpt-6.1-sol", "source": "codex",
+      "job": "Codex threads in the API repo", "folders": ["~/projects/api"] },
+    { "id": "cx-lab", "name": "Codex Lab", "team": "Codex", "model": "gpt-6.1-sol", "source": "codex",
+      "job": "Codex experiments", "folders": ["~/projects/codex-lab"] }
+  ]
+}

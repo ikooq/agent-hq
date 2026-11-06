@@ -11,4 +11,7 @@ screenshots/
 screenshot-*.png
 reports/
 secret
+roster.json
+start-hidden.vbs
+*.bak-*
 node_modules/

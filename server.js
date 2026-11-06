@@ -23,6 +23,7 @@ const ORIGINS = [`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`];
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 let git = null;
+try { if (!fs.existsSync(path.join(HQ, 'roster.json')) && fs.existsSync(path.join(__dirname, 'roster.example.json'))) fs.copyFileSync(path.join(__dirname, 'roster.example.json'), path.join(HQ, 'roster.json')); } catch (e) {}
 const engine = createEngine({ readBudgetMs: 60, gitInfo: id => git && git.get(id) });   // each tick reads files for at most ~60 ms
 // git status of roster folders: background child processes, at most once a minute per folder; a change triggers a tick
 git = createGitWatcher({ roster: () => engine.roster(), expand: p => engine.expand(p), intervalMs: +process.env.AGENT_HQ_GIT_MS || 60000, onChange: () => scheduleTick('git'), log });

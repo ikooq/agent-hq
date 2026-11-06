@@ -81,17 +81,25 @@ function openBrowser() {
   else spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [URL_], { detached: true, stdio: 'ignore' }).unref();
 }
 
+// ~/.claude/settings.json may start with a UTF-8 BOM (written by PowerShell / Notepad)
+const readSettingsJSON = f => JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, ''));
+const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Notification', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop', 'PermissionRequest'];
+const isOurs = h => /\.agent-hq[\\/]hook\.js/.test(String(h && h.command || ''));
 function install() {
+  // 0) roster.json from the example on a fresh install (your roster.json is never overwritten)
+  const roster = path.join(HQ, 'roster.json'), example = path.join(HQ, 'roster.example.json');
+  if (!fs.existsSync(roster) && fs.existsSync(example)) { fs.copyFileSync(example, roster); say(`roster: created ${roster} from roster.example.json (edit the folders to match your projects)`); }
   // 1) hooks in ~/.claude/settings.json (keeps existing hooks)
   const sf = path.join(os.homedir(), '.claude', 'settings.json');
-  const s = fs.existsSync(sf) ? JSON.parse(fs.readFileSync(sf, 'utf8')) : {};
+  fs.mkdirSync(path.dirname(sf), { recursive: true });
+  const s = fs.existsSync(sf) ? readSettingsJSON(sf) : {};
   const cmd = `node "${path.join(HQ, 'hook.js').replace(/\\/g, '/')}"`;
   s.hooks = s.hooks || {};
-  const events = ['SessionStart', 'UserPromptSubmit', 'Notification', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop', 'PermissionRequest'];
+  const events = HOOK_EVENTS;
   for (const ev of events) {
     const list = s.hooks[ev] = s.hooks[ev] || [];
     const timeout = ev === 'PermissionRequest' ? 75 : 5;   // PermissionRequest waits up to 60 s for a decision from the office
-    if (!list.some(g => (g.hooks || []).some(h => String(h.command || '').includes('.agent-hq/hook.js'))))
+    if (!list.some(g => (g.hooks || []).some(isOurs)))
       list.push({ hooks: [{ type: 'command', command: cmd, timeout }] });
   }
   try { require('./approvals').ensureSecret(HQ); } catch (e) {}
@@ -99,16 +107,19 @@ function install() {
   say(`hooks: ${events.join(', ')} -> ${sf}`);
   if (process.platform !== 'win32') return;
   // 2) hidden autostart at login: Startup shortcut -> wscript -> start-hidden.vbs
-  const vbs = path.join(HQ, 'start-hidden.vbs');
-  fs.writeFileSync(vbs, [
-    "' Agent HQ: start the server at login with no console window.",
-    'Set sh = CreateObject("WScript.Shell")',
-    `sh.Run """${process.execPath}"" ""${path.join(HQ, 'cli.js')}"" start --quiet", 0, False`, ''].join('\r\n'));
-  const startup = path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Agent HQ.lnk');
-  const ps = `$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:HQ_LNK);$s.TargetPath="$env:WINDIR\\System32\\wscript.exe";$s.Arguments='"'+$env:HQ_VBS+'"';$s.WorkingDirectory=$env:HQ_DIR;$s.WindowStyle=7;$s.Description='Agent HQ server (hidden)';$s.Save()`;
-  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { env: { ...process.env, HQ_LNK: startup, HQ_VBS: vbs, HQ_DIR: HQ }, stdio: 'inherit' });
-  say(`autostart: ${startup}`);
+  if (!process.argv.includes('--no-autostart')) {
+    const vbs = path.join(HQ, 'start-hidden.vbs');
+    fs.writeFileSync(vbs, [
+      "' Agent HQ: start the server at login with no console window.",
+      'Set sh = CreateObject("WScript.Shell")',
+      `sh.Run """${process.execPath}"" ""${path.join(HQ, 'cli.js')}"" start --quiet", 0, False`, ''].join('\r\n'));
+    const startup = path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Agent HQ.lnk');
+    const ps = `$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:HQ_LNK);$s.TargetPath="$env:WINDIR\\System32\\wscript.exe";$s.Arguments='"'+$env:HQ_VBS+'"';$s.WorkingDirectory=$env:HQ_DIR;$s.WindowStyle=7;$s.Description='Agent HQ server (hidden)';$s.Save()`;
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { env: { ...process.env, HQ_LNK: startup, HQ_VBS: vbs, HQ_DIR: HQ }, stdio: 'inherit' });
+    say(`autostart: ${startup}`);
+  }
   // 3) `agent-hq` on PATH via the npm global bin folder (already on PATH for npm users)
+  if (process.argv.includes('--no-shim')) return;
   try {
     const bin = execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['prefix', '-g'], { encoding: 'utf8', shell: true }).trim();
     fs.writeFileSync(path.join(bin, 'agent-hq.cmd'), `@echo off\r\nnode "%USERPROFILE%\\.agent-hq\\cli.js" %*\r\n`);
@@ -126,7 +137,7 @@ function setSettings(fn) {
 }
 function approvalsCmd(arg) {
   const sf = path.join(os.homedir(), '.claude', 'settings.json');
-  let hooked = false; try { hooked = JSON.stringify(JSON.parse(fs.readFileSync(sf, 'utf8')).hooks.PermissionRequest || []).includes('.agent-hq/hook.js'); } catch (e) {}
+  let hooked = false; try { hooked = JSON.stringify(readSettingsJSON(sf).hooks.PermissionRequest || []).includes('.agent-hq/hook.js'); } catch (e) {}
   if (arg === 'on') {
     require('./approvals').ensureSecret(HQ);
     const lan = process.argv.includes('--lan');
@@ -179,6 +190,33 @@ async function lanCmd(arg) {
   } else if (fw && fw.rule) say(`\nWindows Firewall: an inbound allow rule for TCP ${PORT} exists.`);
 }
 
+// Removes only what install added: Agent HQ hook entries, the Startup shortcut, the agent-hq command.
+// Other hooks in ~/.claude/settings.json stay. Data in ~/.agent-hq stays unless the caller deletes it.
+async function uninstall() {
+  await stop();
+  const sf = path.join(os.homedir(), '.claude', 'settings.json');
+  if (fs.existsSync(sf)) {
+    const s = readSettingsJSON(sf); let removed = 0;
+    for (const ev of Object.keys(s.hooks || {})) {
+      s.hooks[ev] = s.hooks[ev].map(g => ({ ...g, hooks: (g.hooks || []).filter(h => { const o = isOurs(h); if (o) removed++; return !o; }) })).filter(g => (g.hooks || []).length);
+      if (!s.hooks[ev].length) delete s.hooks[ev];
+    }
+    if (s.hooks && !Object.keys(s.hooks).length) delete s.hooks;
+    fs.writeFileSync(sf, JSON.stringify(s, null, 2) + '\n');
+    say(`hooks: removed ${removed} Agent HQ hook entries from ${sf} (other hooks kept)`);
+  }
+  if (process.platform === 'win32' && process.env.APPDATA) {
+    const lnk = path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Agent HQ.lnk');
+    if (fs.existsSync(lnk)) { fs.unlinkSync(lnk); say(`autostart: removed ${lnk}`); }
+  }
+  if (!process.argv.includes('--no-shim')) {
+    try {
+      const bin = execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['prefix', '-g'], { encoding: 'utf8', shell: true }).trim();
+      for (const f of ['agent-hq.cmd', 'agent-hq']) { const p = path.join(bin, f); if (fs.existsSync(p) && /\.agent-hq/.test(fs.readFileSync(p, 'utf8'))) { fs.unlinkSync(p); say(`command: removed ${p}`); } }
+    } catch (e) {}
+  }
+}
+
 async function bench() {
   const secs = +(process.argv.find(a => /^--seconds=/.test(a)) || '--seconds=60').split('=')[1];
   if (!(await start())) return;
@@ -228,7 +266,8 @@ usage: agent-hq <command>
   soak      long run through a real server on a temp home (--minutes=60): leaks + slowdown, CSV in ~/.agent-hq
   lan on | off   the office on your phone over home Wi-Fi (token link + QR code; read-only)
   approvals on [--lan] | off   Allow once / Deny for Claude Code permission prompts from the office (off by default)
-  install   (re)install hooks, hidden autostart and the agent-hq command`;
+  install   (re)install hooks, hidden autostart and the agent-hq command (install.ps1 does this + more)
+  uninstall remove the hooks, autostart and command (uninstall.ps1 also asks about agents and data)`;
 
 (async () => {
   const cmd = process.argv[2];
@@ -243,6 +282,7 @@ usage: agent-hq <command>
       process.exitCode = r.status; break;
     }
     case 'install': install(); break;
+    case 'uninstall': await uninstall(); break;
     case 'bench': await bench(); break;
     case 'soak': await require('./soak').main(); break;
     case 'report': require('./report').main(process.argv.slice(3)); break;
