@@ -278,7 +278,7 @@ usage: agent-hq <command>
     case 'status': await status(); break;
     case 'open': if (await start()) openBrowser(); break;
     case 'test': {
-      const r = require('child_process').spawnSync(process.execPath, [path.join(HQ, 'test.js'), ...process.argv.slice(3)], { stdio: 'inherit' });
+      const r = require('child_process').spawnSync(process.execPath, [path.join(__dirname, 'test.js'), ...process.argv.slice(3)], { stdio: 'inherit' });
       process.exitCode = r.status; break;
     }
     case 'install': install(); break;
