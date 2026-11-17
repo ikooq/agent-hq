@@ -3,6 +3,8 @@
 // Codex: reads ~/.codex/sessions and ~/.codex/archived_sessions only; never writes into ~/.codex.
 'use strict';
 const fs = require('fs'), path = require('path'), os = require('os'), zlib = require('zlib');
+const { clip, taskLine, modelLabel, actionLabel, codexActionLabel, feedPhrase } = require('./labels');
+const { tail, closeIdleFds, openFiles, readJSON, writeJSONAtomic } = require('./files');
 
 const MIN = 60000, DAY = 86400000;
 const pad = n => String(n).padStart(2, '0');
@@ -10,123 +12,10 @@ const dayKey = t => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.
 const monthKey = t => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; };
 const startOfDay = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
 const ms = v => (v ? (typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : (Date.parse(v) || 0)) : 0);
-const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
-// First real line of a prompt ("Fix login bug"): skips system/tool text (lines starting with "<") and interruption markers.
-function taskLine(txt) {
-  txt = String(txt || '');
-  const req = /## My request for Codex:\s*/.exec(txt); if (req) txt = txt.slice(req.index + req[0].length);   // Codex IDE context block
-  else if (/^\s*# (Files mentioned by the user|Context from my IDE)/.test(txt)) return null;
-  for (const l of txt.split(/\r?\n/)) { const x = l.trim(); if (!x || x.startsWith('<') || /^\[Request interrupted/.test(x) || /^Caveat: /.test(x)) continue; return clip(x, 40); }
-  return null;
-}
 const RANK = { waiting: 6, stuck: 5, running: 4, working: 3, resting: 2, off: 1 };
-
-function modelLabel(m, source) {
-  const x = /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?(?!\d)/i.exec(m || '');
-  if (x) return x[1][0].toUpperCase() + x[1].slice(1) + ' ' + x[2] + (x[3] ? '.' + x[3] : '');
-  if (source === 'codex' || /^(gpt|o\d|codex)/i.test(m || '')) return 'OpenAI · ' + (m || 'codex');
-  return m ? clip(m, 18) : '—';
-}
 function idxLE(a, t) { let lo = 0, hi = a.length - 1, r = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (a[m] <= t) { r = m; lo = m + 1; } else hi = m - 1; } return r; }
 const lastLE = (a, t) => { const i = idxLE(a, t); return i < 0 ? 0 : a[i]; };
 function insertSorted(a, v) { if (!a.length || a[a.length - 1] <= v) a.push(v); else { a.push(v); a.sort((x, y) => x - y); } }
-
-// Open files are kept for files that keep growing: on Windows each open costs 1-2 ms (more under load), and
-// live transcripts + the event log grow on almost every tick. A handle is closed after 20 s without new
-// bytes, or when the path now points to another file (inode changed). Node opens with FILE_SHARE_DELETE,
-// so a held handle never stops Claude Code / Codex from writing, renaming or deleting the file.
-const FD_IDLE_MS = 20000, FD_MAX = 64, fdCache = new Map();   // file -> { fd, ino, used }
-function dropFd(file) { const e = fdCache.get(file); if (e) { fdCache.delete(file); try { fs.closeSync(e.fd); } catch (x) {} } }
-function fdFor(file, ino) {
-  let e = fdCache.get(file);
-  if (e && e.ino !== ino) { dropFd(file); e = null; }
-  if (!e) {
-    if (fdCache.size >= FD_MAX) { let old = null; for (const [f, x] of fdCache) if (!old || x.used < old[1].used) old = [f, x]; dropFd(old[0]); }
-    e = { fd: fs.openSync(file, 'r'), ino, used: 0 }; fdCache.set(file, e);
-  }
-  e.used = Date.now();
-  return e.fd;
-}
-function closeIdleFds(all) { const t = Date.now(); for (const [f, e] of [...fdCache]) if (all || t - e.used > FD_IDLE_MS) dropFd(f); }
-// Read only the bytes appended since the last call; tolerate missing/rotated files.
-function tail(file, st) {
-  try {
-    const s = fs.statSync(file), size = s.size;
-    st.missing = false;
-    if (size < st.offset) { st.offset = 0; st.rest = ''; st.reset = true; }
-    if (size === st.offset) return [];
-    const fd = fdFor(file, s.ino);
-    const len = Math.min(size - st.offset, 64 * 1024 * 1024);
-    const buf = Buffer.alloc(len);
-    const n = fs.readSync(fd, buf, 0, len, st.offset);
-    st.offset += n;
-    const lines = (st.rest + buf.toString('utf8', 0, n)).split('\n');
-    st.rest = lines.pop();
-    return lines.filter(l => l.trim());
-  } catch (e) { dropFd(file); st.missing = true; return []; }
-}
-const readJSON = (f, dflt) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return dflt; } };
-function writeJSONAtomic(f, obj) {
-  fs.mkdirSync(path.dirname(f), { recursive: true });
-  const tmp = f + '.tmp' + process.pid;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 1));
-  fs.renameSync(tmp, f);
-}
-
-// Short human label for a tool call: "Edit server.js", "Bash: npm run build".
-function actionLabel(name, inp) {
-  inp = inp || {};
-  const base = p => path.basename(String(p || '').replace(/\\/g, '/'));
-  const host = u => { try { return new URL(u).host; } catch (e) { return clip(u, 40); } };
-  name = String(name || 'tool');
-  const mcp = /^mcp__(.+?)__(.+)$/.exec(name);
-  if (mcp) return clip(`${mcp[2]} (${mcp[1].replace(/^plugin_[^_]+_/, '')})`, 70);
-  switch (name) {
-    case 'Bash': case 'PowerShell': return clip(`${name}: ${inp.command || inp.description || ''}`, 80);
-    case 'Read': case 'Write': case 'Edit': case 'MultiEdit': return `${name} ${clip(base(inp.file_path), 50)}`;
-    case 'NotebookEdit': return `Edit ${clip(base(inp.notebook_path), 50)}`;
-    case 'Grep': return clip(`Grep "${inp.pattern || ''}"`, 70);
-    case 'Glob': return clip(`Glob ${inp.pattern || ''}`, 70);
-    case 'WebFetch': return `WebFetch ${host(inp.url)}`;
-    case 'WebSearch': return clip(`WebSearch "${inp.query || ''}"`, 70);
-    case 'Task': case 'Agent': return clip(`Agent: ${inp.description || ''}${inp.subagent_type ? ' (' + inp.subagent_type + ')' : ''}`, 80);
-    case 'TodoWrite': return 'Update plan';
-    case 'AskUserQuestion': return 'Ask you a question';
-    case 'Skill': return clip(`Skill ${inp.skill || ''}`, 60);
-    default: {
-      const v = Object.values(inp).find(x => typeof x === 'string');
-      return clip(v ? `${name}: ${v}` : name, 70);
-    }
-  }
-}
-// Codex tool calls: shell commands arrive as arrays, patches as text.
-function codexActionLabel(name, args, ns) {
-  let a = args;
-  if (typeof a === 'string') { try { a = JSON.parse(a); } catch (e) { a = { input: a }; } }
-  a = a || {};
-  const cmd = Array.isArray(a.command) ? a.command.filter(x => !/^(bash|sh|powershell(\.exe)?|pwsh|cmd(\.exe)?|-l?c|-Command|\/c)$/i.test(x)).join(' ') : a.command || a.cmd;
-  if (cmd) return clip(`Shell: ${cmd}`, 80);
-  if (/apply_patch/.test(name) || /\*\*\* (Update|Add) File: /.test(a.input || '')) { const m = /\*\*\* (?:Update|Add) File: (.+)/.exec(a.input || ''); return `Edit ${m ? path.basename(m[1].trim()) : '(patch)'}`; }
-  if (name === 'js' || name === 'exec') {
-    const code = String(a.code || a.input || '');
-    const sh = /exec_command\(\{\s*cmd:\s*(["'`])((?:\\.|(?!\1).)*)\1/.exec(code);
-    if (sh) return clip(`Shell: ${sh[2].replace(/\\(["'\\])/g, '$1')}`, 80);
-    const tool = /tools\.(?:mcp__[a-z0-9_]+?__)?([a-z0-9_]+)\(/i.exec(code);
-    if (tool) return clip(`${a.title ? a.title + ' · ' : ''}${tool[1].replace(/_/g, ' ')}`, 70);
-    return clip(`Run: ${a.title || code.split('\n')[0]}`, 70);
-  }
-  if (name === 'spawn_agent') return clip(`Agent: ${a.task || a.description || a.name || ''}`, 70);
-  const v = Object.values(a).find(x => typeof x === 'string');
-  return clip(`${ns ? ns.replace(/^mcp__/, '') + ' ' : ''}${name}${v ? ': ' + v : ''}`, 70);
-}
-function feedPhrase(label) {
-  const m = /^(\w+)(?::)? (.*)$/.exec(label || '');
-  if (!m) return String(label || '').toLowerCase();
-  const [, verb, rest] = m;
-  return ({ Edit: `edited ${rest}`, MultiEdit: `edited ${rest}`, Write: `wrote ${rest}`, Read: `read ${rest}`, Bash: `ran ${rest}`, PowerShell: `ran ${rest}`, Shell: `ran ${rest}`,
-    Grep: `searched code for ${rest}`, Glob: `listed ${rest}`, WebFetch: `opened ${rest}`, WebSearch: `searched the web for ${rest}`, Agent: `started a helper: ${rest}`,
-    Run: `ran ${rest}`, Skill: `used skill ${rest}` })[verb] || (label[0].toLowerCase() + label.slice(1));
-}
 
 function createEngine(opts = {}) {
   const home = opts.home || os.homedir();
@@ -944,7 +833,7 @@ function createEngine(opts = {}) {
 
   return {
     tick, state: () => lastState || tick(), timeline, stats, report, persistStats, persistToday, backfillStep, maintain, hint, roster, expand, botFor, HQ, CODEX,
-    addCodexFile, scanCodex: () => scanCodex(true), memStats, tickParts: () => tickParts, close: () => closeIdleFds(true), openFiles: () => fdCache.size, isWarm: () => warm, backlog: () => backlog,
+    addCodexFile, scanCodex: () => scanCodex(true), memStats, tickParts: () => tickParts, close: () => closeIdleFds(true), openFiles, isWarm: () => warm, backlog: () => backlog,
     watchedFiles: () => ({ codex: [...codexFiles.keys()], transcripts: [...sessions.values()].map(s => s.transcript).filter(Boolean) }),
     _internals: { sessions, subs, finished, sessionStatusAt, subStatusAt, costOf, priceFor, timelineFor, todayTimeline, pendingDays },
   };
