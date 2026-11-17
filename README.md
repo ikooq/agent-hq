@@ -4,13 +4,30 @@
 
 A live 3D office for your Claude Code and Codex agents. Each bot sits at a desk and shows what it is working on, what it is waiting for, and when it gets stuck. It runs on your computer with no dependencies to install.
 
+**Status:** a personal project under active development (November 2026). The installer is Windows only; the self-test runs in CI on Windows and Ubuntu. MIT licensed.
+
 ![The office in demo mode, with six fake agents](docs/demo.png)
 
 See it without any setup of your own: start the server and open http://127.0.0.1:7777/?demo=1. The demo is a scripted day with fake agents, and it is what the screenshot shows.
 
+## Why
+
+When you run several Claude Code and Codex sessions at once, the question is always the same: which one is waiting for me, which one is stuck, and which one finished? Each session answers only in its own terminal tab. Agent HQ answers for all of them on one screen:
+
+- **Waiting on you:** a session that hit a permission prompt walks to the approval kiosk and raises a Windows toast.
+- **Stuck:** a session that is working but has written nothing for 10 minutes turns red. A long-running command does not count as stuck.
+- **Claude Code and Codex together:** Claude Code reports through hooks; Codex is read from its own session logs.
+- **Nothing leaves the machine:** statuses and tokens come from local logs, with no model calls and no network.
+
+What it does not do:
+
+- It does not start, stop or steer agents. The only action it can take is the optional Allow once / Deny for Claude Code permission prompts, which is off by default.
+- It is not a team or cloud dashboard: one computer, one user.
+- Costs are estimates from `prices.json`, not billing data, and Codex models show "$ n/a" until you add their prices.
+
 ## Install
 
-You need [Node.js](https://nodejs.org) 20 or newer (22 recommended) and git.
+You need git and [Node.js](https://nodejs.org) 22.15 or newer. On older versions the office still runs, but archived Codex sessions are skipped (they are zstd-compressed) and `agent-hq bench` / `soak` need the built-in WebSocket from Node 22.
 
 On Windows:
 
@@ -46,6 +63,7 @@ Then edit `~/.agent-hq/roster.json` so each bot's `folders` match your projects.
 | `agent-hq approvals on` / `off` | Allow once or Deny Claude Code permission prompts from the office (off by default; `on --lan` also allows it from the phone) |
 | `agent-hq lan on` / `off` | Read-only office on your phone over home Wi-Fi, through a token link and QR code (off by default) |
 | `agent-hq test` | Self-test against a temporary home folder |
+| `agent-hq check` | Check the rules in [CONSTRAINTS.md](CONSTRAINTS.md); `--full` also runs the self-test |
 | `agent-hq bench` | 60-second browser benchmark with 15 fake agents (needs Chrome or Edge) |
 | `agent-hq soak --minutes=60` | Long run on a temporary home folder to catch leaks and slowdowns |
 | `agent-hq install` / `uninstall` | Add or remove the hooks, autostart and command |
@@ -73,3 +91,12 @@ Costs in the office are estimates from `prices.json`, not billing data.
 - `report.js`, `approvals.js`, `lan.js`, `git.js`: daily report, approvals, phone mode, git on desks
 - `roster.example.json`: starter roster; `prices.json`: model prices for cost estimates
 - `claude/`: the subagents and a sample of the hooks block
+- `labels.js`, `files.js`: label text for tool calls and models; incremental log reading
+
+## Development
+
+The project's rules (built-ins only, no outside URLs, frame-rate and leak budgets, private files never committed) are in [CONSTRAINTS.md](CONSTRAINTS.md). Run `node cli.js check --full` before you send a change; CI runs the same command. To see the office with worst-case data (long names, empty roster, 60 agents), open http://127.0.0.1:7777/?data=worst.
+
+## License
+
+[MIT](LICENSE). Three.js, vendored in `vendor/`, is also MIT.
