@@ -7,6 +7,15 @@ import { Builder, Billboards, billboardMaterial, atlasMaterial, botColor, STATUS
 const CAP = 64;
 const fmtTok = n => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n)); };
 const STATUS_CSS = { working: '#3fae7c', running: '#3f9fae', waiting: '#e39a2d', stuck: '#e0565f', resting: '#7d98df', off: '#9a94a6' };
+// Longest start of s (whole graphemes, so emoji stay intact) that fits max px, ending in "…".
+// fillText's own maxWidth would squeeze the glyphs instead, which made long names unreadable.
+const graphemes = s => Intl.Segmenter ? [...new Intl.Segmenter().segment(s)].map(x => x.segment) : Array.from(s);
+function fitText(g, s, max) {
+  s = String(s || ''); if (g.measureText(s).width <= max) return s;
+  const gs = graphemes(s); let lo = 0, hi = gs.length;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (g.measureText(gs.slice(0, m).join('').trimEnd() + '…').width <= max) lo = m; else hi = m - 1; }
+  return gs.slice(0, lo).join('').trimEnd() + '…';
+}
 export const gitLine = g => [g.branch || '?', g.changed ? g.changed + ' changed' : 'clean', g.unpushed ? g.unpushed + ' unpushed' : null].filter(Boolean).join(' · ');
 // bottom strip of a desk monitor: "main · 3 changed · 1 unpushed"; orange dot when uncommitted work is older than 2 h
 function paintGit(g, W, H, git, sts) {
@@ -351,11 +360,11 @@ export class Actors {
     a.tagKey = label + st + sel; a.tagRect = slot < 0 ? null : atlas.rect(slot);
     if (slot < 0) return;                                  // atlas full (more agents than CAP): no tag rather than a shared slot
     atlas.draw(slot, a.tagKey, (g, W, H) => {
-      g.font = `${a.kind === 'helper' ? 600 : 700} 30px Segoe UI, sans-serif`; const tw = Math.min(W - 54, g.measureText(label).width);
+      g.font = `${a.kind === 'helper' ? 600 : 700} 30px Segoe UI, sans-serif`; const text = fitText(g, label, W - 54), tw = g.measureText(text).width;
       const pw = tw + 52, x0 = (W - pw) / 2; rr(g, x0, 6, pw, H - 12, 24); g.fillStyle = sel ? 'rgba(58,51,70,.94)' : 'rgba(255,252,247,.94)'; g.fill();
       g.lineWidth = 3; g.strokeStyle = STATUS_CSS[st] || '#999'; g.stroke();
       g.fillStyle = STATUS_CSS[st] || '#999'; g.beginPath(); g.arc(x0 + 22, H / 2, 8, 0, 7); g.fill();
-      g.fillStyle = sel ? '#fff' : '#3a3346'; g.textBaseline = 'middle'; g.fillText(label, x0 + 38, H / 2 + 1, W - 54);
+      g.fillStyle = sel ? '#fff' : '#3a3346'; g.textBaseline = 'middle'; g.fillText(text, x0 + 38, H / 2 + 1);
     });
   }
   refreshTask(a, task) {   // paper task card with the prompt's first line (slot redrawn only when the text changes)
@@ -363,12 +372,12 @@ export class Actors {
     a.taskKey = task; a.taskRect = slot < 0 ? null : atlas.rect(slot);
     if (slot < 0) return;
     atlas.draw(slot, task, (g, W, H) => {
-      g.font = '600 25px Segoe UI, sans-serif'; const tw = Math.min(W - 60, g.measureText(task).width), pw = tw + 50, x0 = (W - pw) / 2;
+      g.font = '600 25px Segoe UI, sans-serif'; const text = fitText(g, task, W - 60), tw = g.measureText(text).width, pw = tw + 50, x0 = (W - pw) / 2;
       a.taskW = pw / 2 + 4;
       g.shadowColor = 'rgba(40,30,50,.25)'; g.shadowBlur = 6; g.shadowOffsetY = 2;
       rr(g, x0, 8, pw, H - 16, 8); g.fillStyle = '#fffaf0'; g.fill(); g.shadowColor = 'transparent';
       g.fillStyle = '#e8b04a'; g.fillRect(x0 + 12, 16, 5, H - 32);            // tape strip
-      g.fillStyle = '#4a4058'; g.textBaseline = 'middle'; g.fillText(task, x0 + 30, H / 2 + 1, W - 60);
+      g.fillStyle = '#4a4058'; g.textBaseline = 'middle'; g.fillText(text, x0 + 30, H / 2 + 1);
     });
   }
   slotFor(map, key, atlas) { let s = map.get(key); if (s == null || s < 0) { s = atlas.alloc(); map.set(key, s); } return s; }
@@ -406,7 +415,7 @@ export class Actors {
           rr(g, 2, 2, W - 4, H - 4, 14); g.fillStyle = 'rgba(255,252,247,.96)'; g.fill(); g.lineWidth = 3; g.strokeStyle = col; g.stroke();
           let fs = 30; g.font = `800 ${fs}px Segoe UI, sans-serif`; while (g.measureText(label).width > W - 36 && fs > 18) { fs--; g.font = `800 ${fs}px Segoe UI, sans-serif`; }
           rr(g, 8, 8, W - 16, 42, 10); g.fillStyle = col; g.fill();
-          g.fillStyle = '#fff'; g.textBaseline = 'middle'; g.textAlign = 'center'; g.fillText(label, W / 2, 30, W - 28);
+          g.fillStyle = '#fff'; g.textBaseline = 'middle'; g.textAlign = 'center'; g.fillText(fitText(g, label, W - 28), W / 2, 30);
           const maxT = this.maxTok || 1; g.fillStyle = 'rgba(80,60,100,.14)'; rr(g, 14, 64, W - 120, 12, 6); g.fill(); g.fillStyle = col; rr(g, 14, 64, Math.max(10, (W - 120) * Math.min(1, tok / maxT)), 12, 6); g.fill();
           g.fillStyle = '#3a3346'; g.font = '800 26px Segoe UI, sans-serif'; g.textAlign = 'right'; g.fillText(fmtTok(tok), W - 12, 71);
           if (b.git) { g.fillStyle = b.git.changed ? '#b3651a' : '#3f8a66'; g.font = '700 17px Cascadia Mono, Consolas, monospace'; g.textAlign = 'left'; g.fillText('⎇ ' + gitLine(b.git), 14, 98, W - 28); }
@@ -431,7 +440,7 @@ export class Actors {
     g.fillStyle = 'rgba(255,255,255,.08)'; g.fillRect(0, 0, W, 28);
     g.fillStyle = accent; g.font = '700 17px Segoe UI, sans-serif'; g.textBaseline = 'middle';
     g.fillText({ working: '● working', running: '▶ running', waiting: '? needs approval', stuck: '! stuck', resting: '☕ break' }[sts], 9, 15);
-    g.fillStyle = 'rgba(255,255,255,.6)'; g.textAlign = 'right'; g.fillText(r.label, W - 9, 15, 110); g.textAlign = 'left';
+    g.fillStyle = 'rgba(255,255,255,.6)'; g.textAlign = 'right'; g.fillText(fitText(g, r.label, 110), W - 9, 15); g.textAlign = 'left';
     if (sts === 'running') {
       const grd = g.createRadialGradient(W / 2, H / 2 + 14, 4, W / 2, H / 2 + 14, W * .6); grd.addColorStop(0, 'rgba(80,220,200,.25)'); grd.addColorStop(1, 'rgba(80,220,200,0)'); g.fillStyle = grd; g.fillRect(0, 28, W, H - 28);
       g.fillStyle = '#c9fff3'; g.font = '600 16px Cascadia Mono, Consolas, monospace'; g.fillText('$ ' + r.step.replace(/^Running (\w+: )?/, '').slice(0, 26), 9, 52);

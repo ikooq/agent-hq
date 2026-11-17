@@ -7,6 +7,7 @@ import { computeLayout, layoutKey } from '/web/layout.js';
 import { NavGrid } from '/web/nav.js';
 import { UI } from '/web/ui.js';
 import { createDemo } from '/web/demo.js';
+import { stressState, stressToggle } from '/web/stress.js';
 import { Recorder } from '/web/recorder.js';
 
 const params = new URLSearchParams(location.search);
@@ -47,7 +48,7 @@ function apply(s, prev) {
     actors.setLayout(L, new NavGrid(L));
     const c = new THREE.Color();
     L.desks.forEach((d, i) => { const b = s.bots.find(x => x.id === d.botId); world.rugs.setColorAt(i, b ? c.copy(botColor(b, d.index)).lerp(new THREE.Color(0xffffff), .25) : c.set(0xdddddd)); });
-    world.rugs.instanceColor.needsUpdate = true;
+    if (world.rugs.instanceColor) world.rugs.instanceColor.needsUpdate = true;   // null when there are no desks yet (empty roster)
     perf.lastBuildMs = performance.now() - t0; soak.rebuilds++;
   }
   actors.sync(s);
@@ -204,5 +205,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { la
 let demo = null;
 if (BENCH) { benchFrame = runBench(); document.body.classList.add('bench'); }
 else if (DEMO) { document.body.classList.add('demo'); demo = createDemo({ apply: (s, prev) => { state = s; apply(s, prev); }, world, ui }); ui.demo = demo; conn.textContent = 'demo · fake agents'; demo.start(); }
+else if (params.has('data')) { const s = stressState(params.get('data')); state = s; apply(s, null); conn.textContent = 'stress data · ' + params.get('data'); stressToggle(params.get('data')); }   // dev only: worst-case fixtures
 else if (params.has('nolive')) loadState(); else connect();
+if (DEMO && params.has('stress')) stressToggle('demo');
 requestAnimationFrame(loop);

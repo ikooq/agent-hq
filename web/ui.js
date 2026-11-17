@@ -203,10 +203,13 @@ export class UI {
       row.el.classList.toggle('sel', !!(this.selected && (this.selected.botId === b.id)));
     });
     for (const [id, row] of this.rows) if (!seen.has(id)) { row.el.remove(); this.rows.delete(id); }
+    const empty = host.querySelector('.empty');
+    if (!bots.length && !empty) host.insertAdjacentHTML('beforeend', '<div class="empty">No agents yet. Start a Claude Code or Codex session in a folder from roster.json.</div>');
+    else if (bots.length && empty) empty.remove();
   }
   renderFeed(s) {
     const host = $('feed'); const want = s.feed.slice(0, 40); const keys = want.map(f => `${f.t}|${f.botId}|${f.text}`);
-    if (keys.join('\n') === this.feedKeys.join('\n')) return;
+    if (keys.join('\n') === this.feedKeys.join('\n') && (keys.length || host.querySelector('.empty'))) return;
     const have = new Map([...host.children].map(el => [el.dataset.key, el]));
     keys.forEach((k, i) => {
       let el = have.get(k);
