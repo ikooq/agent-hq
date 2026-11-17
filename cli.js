@@ -266,6 +266,7 @@ usage: agent-hq <command>
   status    is it running? live counts per bot
   open      start if needed, then open ${URL_}
   test      run the self-test against a temp home (synthetic data)
+  check     check the rules in CONSTRAINTS.md (--full: also the self-test)
   bench     60 s browser benchmark with 15 fake agents (fps, p95, draw calls, heap)
   report    daily report from local logs: ~/.agent-hq/reports/YYYY-MM-DD.html (--date=YYYY-MM-DD, default today)
   soak      long run through a real server on a temp home (--minutes=60): leaks + slowdown, CSV in ~/.agent-hq
@@ -284,6 +285,10 @@ usage: agent-hq <command>
     case 'open': if (await start()) openBrowser(); break;
     case 'test': {
       const r = require('child_process').spawnSync(process.execPath, [path.join(__dirname, 'test.js'), ...process.argv.slice(3)], { stdio: 'inherit' });
+      process.exitCode = r.status; break;
+    }
+    case 'check': {   // CONSTRAINTS.md checks; --full also runs the self-test and its ratchet
+      const r = require('child_process').spawnSync(process.execPath, [path.join(__dirname, 'scripts', 'check.js'), ...process.argv.slice(3)], { stdio: 'inherit' });
       process.exitCode = r.status; break;
     }
     case 'install': install(); break;

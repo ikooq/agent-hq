@@ -22,4 +22,4 @@ jobs:
         with:
           node-version: 22
       # The self-test needs no browser or GPU; `agent-hq bench` and `soak` are the Chrome runs and stay local.
-      - run: node cli.js test
+      - run: node cli.js check --full
