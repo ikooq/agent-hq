@@ -68,6 +68,10 @@ function askOffice(i, line) {
   let settings = {}, secret = '';
   try { settings = JSON.parse(fs.readFileSync(path.join(HQ, 'settings.json'), 'utf8')); } catch (e) {}
   if (!settings.approvals || !settings.approvals.enabled) return exit();
+  // Anything that touches Agent HQ itself (its secret, settings, server) or Claude Code's settings stays in the terminal:
+  // one office approval must never let a local process read the secret and approve later requests on its own.
+  const self = new RegExp(`agent-hq|(?:127\\.0\\.0\\.1|localhost|\\[::1\\]):${PORT}\\b|\\.claude[\\\\/]+settings`, 'i');
+  if (self.test(line.detail || '')) return exit();
   try { secret = fs.readFileSync(path.join(HQ, 'secret'), 'utf8').trim(); } catch (e) {}
   if (!secret) return exit();
   clearTimeout(hardStop); hardStop = setTimeout(exit, WAIT_MS + 3000);

@@ -145,6 +145,9 @@ function approvalsCmd(arg) {
     say(`Approvals from the office: ON${lan ? ' (also from the phone over LAN)' : ' (this computer only; add --lan to allow the phone)'}`);
     say('  Allow once / Deny apply to that single request only. The terminal prompt still works: whichever answer comes first wins;');
     say('  the office stops offering a request after 60 s or as soon as it was answered in the terminal.');
+    say('  This is a convenience, not a lock against the agent: any program running as you can reach the office.');
+    say('  Requests that touch Agent HQ or ~/.claude/settings always stay in the terminal, and every office allow shows a toast.');
+    if (lan) say('  Phone approvals travel over plain HTTP: turn them on only on your own home Wi-Fi.');
     if (!hooked) say('  Note: the PermissionRequest hook is not installed yet. Run: agent-hq install');
   } else if (arg === 'off') {
     setSettings(s => { s.approvals = { enabled: false, lan: false }; });
@@ -172,7 +175,8 @@ async function lanCmd(arg) {
   const ipArg = (process.argv.find(a => a.startsWith('--ip=')) || '').slice(5) || null;
   const ip = L.pickLanIp(ipArg);
   if (!ip) { console.error('No private IPv4 address found. Connect to your home Wi-Fi (or pass --ip=).'); process.exitCode = 1; return; }
-  setSettings(s => { const keep = s.lan && s.lan.enabled && s.lan.token; s.lan = { enabled: true, token: keep || L.newToken(), ...(ipArg ? { ip: ipArg } : {}) }; });
+  // a fresh token every time, valid 12 h: an old or leaked phone link stops working
+  setSettings(s => { s.lan = { enabled: true, token: L.newToken(), expires: Date.now() + 12 * 3600e3, ...(ipArg ? { ip: ipArg } : {}) }; });
   if (!(await start())) return;
   let info = null;
   for (let i = 0; i < 30; i++) { info = await get('/api/lan', 1500); if (info && (info.listening || info.error)) break; await sleep(200); }
@@ -181,7 +185,8 @@ async function lanCmd(arg) {
   say(`LAN mode: ON. Open this on your phone (same Wi-Fi):\n\n  ${info.url}\n`);
   say(require('./qr').qrTerminal(info.url));
   say(`\nThe phone is read-only${info.approvals ? ', but it can Allow once / Deny (approvals on --lan)' : '. To approve from the phone too: agent-hq approvals on --lan'}.`);
-  say('The link holds a random token. agent-hq lan off turns LAN mode off and invalidates the link.');
+  say('The link holds a random token and expires in 12 hours (run lan on again for a new one). agent-hq lan off ends it now.');
+  say('It is plain HTTP: use it only on your own home Wi-Fi, never on public or shared networks.');
   const fw = L.firewallInfo(PORT, info.ip);
   if (fw && !fw.rule) {
     say(`\nWindows Firewall: no inbound rule for TCP ${PORT} found${fw.profile ? ` (this network is "${fw.profile}")` : ''}. If the phone cannot open the link,`);

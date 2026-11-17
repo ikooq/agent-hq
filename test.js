@@ -446,6 +446,12 @@ async function approvalChecks(json) {
   check(`no decision: hook prints nothing after the wait (${rn.ms} ms) -> normal terminal prompt`, rn.code === 0 && rn.out === '' && rn.ms >= 3500 && rn.ms < 9000, JSON.stringify(rn));
   const after = (await req('GET', '/state')).json;
   check('expired request leaves the list', after && after.approvals.length === 0);
+  // requests that touch Agent HQ or Claude Code's settings are never offered to the office
+  const selfCmds = [`cat ~/.agent-hq/secret`, `curl -X POST http://127.0.0.1:${PORT}/api/approvals/decide`, `notepad C:\\Users\\me\\.claude\\settings.json`];
+  const rs = await Promise.all(selfCmds.map(c => hookAsync(permInput(c))));
+  const listed = (await req('GET', '/state')).json;
+  check('self-protection: requests touching Agent HQ / ~/.claude/settings stay in the terminal (not offered, no output)',
+    rs.every(r => r.code === 0 && r.out === '' && r.ms < 1500) && listed && listed.approvals.length === 0, JSON.stringify(rs.map(r => r.ms)));
   // answered in the terminal: the session writes its next transcript line -> the office withdraws the request
   fs.mkdirSync(TX, { recursive: true });
   const pt = hookAsync(permInput('echo answered-in-terminal'));

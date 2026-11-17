@@ -250,7 +250,10 @@ const cpu0 = { t: Date.now(), u: process.cpuUsage() };
 // ---------- LAN mode (opt-in, `agent-hq lan on`): a second listener on the home-network IP ----------
 // Every LAN request needs the random token (first visit: ?t=TOKEN, then an HttpOnly SameSite=Strict cookie).
 // The phone is read-only; it may only Allow once / Deny when `agent-hq approvals on --lan` is set.
-const lanCfg = () => settings.lan || {};
+// LAN mode expires (12 h after `agent-hq lan on`): plain HTTP on Wi-Fi, so a leaked link must not stay valid for weeks.
+const lanCfg = () => { const l = settings.lan || {}; return l.expires && Date.now() > l.expires ? {} : l; };
+// Every allow from the office or the phone also raises a Windows toast, so an approval you did not click is visible.
+const noteApproval = (r, by) => { if (r.code === 200 && r.body.decision === 'allow') toast(`Allowed from the ${by}`, `${r.body.tool}: ${r.body.detail}`); };
 const lanApprovals = () => approvalsOn() && !!(settings.approvals && settings.approvals.lan);
 let lanServer = null, lanState = { enabled: false, ip: null, listening: false, error: null };
 function syncLan() {
@@ -270,7 +273,7 @@ function lanGate(req, res, url) {   // true = handled (refused or redirected)
   if (!lanState.ip || host !== `${lanState.ip}:${PORT}`) { send(res, 403, { error: 'forbidden host' }); return true; }
   const token = lanCfg().token, t = new URLSearchParams(req.url.split('?')[1] || '').get('t');
   if (t && sameSecret(t, token)) {   // first visit from the QR link: keep the token in a cookie, drop it from the address bar
-    res.writeHead(302, { ...SEC, Location: '/?m=1', 'Set-Cookie': `hq_lan=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` }); res.end(); return true;
+    res.writeHead(302, { ...SEC, Location: '/?m=1', 'Set-Cookie': `hq_lan=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200` }); res.end(); return true;
   }
   if (!sameSecret(cookieOf(req, 'hq_lan'), token)) { send(res, 401, LAN_DENIED, 'text/html; charset=utf-8'); return true; }
   const lanOrigin = `http://${lanState.ip}:${PORT}`;
@@ -280,7 +283,7 @@ function lanGate(req, res, url) {   // true = handled (refused or redirected)
     readBody(req, body => {
       if (!body) return send(res, 400, { error: 'bad json' });
       if (!sameSecret(req.headers['x-hq-secret'], SECRET)) return send(res, 403, { error: 'bad secret' });
-      const r = approvals.decide(body.id, body.decision, 'phone'); send(res, r.code, r.body);
+      const r = approvals.decide(body.id, body.decision, 'phone'); noteApproval(r, 'phone'); send(res, r.code, r.body);
     });
     return true;
   }
@@ -316,7 +319,7 @@ function handle(req, res, lan) {
       if (url === '/api/approvals/decide') {   // the office: same origin (checked above) + the per-install secret
         if (!sameSecret(req.headers['x-hq-secret'], SECRET)) return send(res, 403, { error: 'bad secret' });
         if (!approvalsOn()) return send(res, 409, { error: 'approvals are off (agent-hq approvals on)' });
-        const r = approvals.decide(body.id, body.decision, 'office');
+        const r = approvals.decide(body.id, body.decision, 'office'); noteApproval(r, 'office');
         return send(res, r.code, r.body);
       }
       if (url === '/api/mute') { settings.muted = !!body.muted; saveSettings(); return send(res, 200, settings); }

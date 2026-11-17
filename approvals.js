@@ -47,7 +47,7 @@ function createApprovals({ hq, waitMs = 60000, onChange = () => {}, log = () => 
     if (!p) return { code: 404, body: { error: 'no such pending request (already decided or expired)' } };
     if (decision !== 'allow' && decision !== 'deny') return { code: 400, body: { error: 'decision must be allow or deny' } };
     finish(p, decision, by);
-    return { code: 200, body: { ok: true, id: p.id, decision } };
+    return { code: 200, body: { ok: true, id: p.id, decision, tool: p.tool, detail: p.detail.slice(0, 160) } };
   }
   const list = () => [...pending.values()].sort((a, b) => a.since - b.since)
     .map(p => ({ id: p.id, session_id: p.session_id, robot: p.session_id ? 'session:' + p.session_id : null, tool: p.tool, detail: p.detail, cwd: p.cwd, since: p.since, until: p.since + waitMs }));
