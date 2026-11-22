@@ -554,13 +554,16 @@ function createEngine(opts = {}) {
   const lastData = s => Math.max(s.lastLine || 0, s.allEv[s.allEv.length - 1] || 0, s.first || 0);
   const touches = (s, day0, day1) => s.first < day1 && lastData(s) + STALE_MS > day0;
   const emptySecs = () => ({ working: 0, waiting: 0, stuck: 0, resting: 0 });
-  // samples [from, to) every `step` ms for one bot; appends to segs (extending the last one) and secs
+  // samples [from, to) every `step` ms for one bot; appends to segs (extending the last one) and secs.
+  // A minute cut short by `to` (today's current minute) is sampled at its last instant, so a state that
+  // began a few seconds ago (a fresh permission prompt) shows on the live bar right away.
   function sampleBot(ss, own, from, to, step, segs, secs) {
     let cur = segs.length ? segs[segs.length - 1] : null;
     for (let t = from; t < to; t += step) {
+      const at = t + step > to ? to - 1 : t;
       let best = null;
-      for (const s of ss) { const st = sessionStatusAt(s, t); if (st && st !== 'off' && (!best || RANK[st] > RANK[best])) best = st; }
-      for (const a of own) { const st = subStatusAt(a, t); if (st && (!best || RANK[st] > RANK[best])) best = st; }
+      for (const s of ss) { const st = sessionStatusAt(s, at); if (st && st !== 'off' && (!best || RANK[st] > RANK[best])) best = st; }
+      for (const a of own) { const st = subStatusAt(a, at); if (st && (!best || RANK[st] > RANK[best])) best = st; }
       const v = best === 'running' ? 'working' : best;
       if (!v) { cur = null; continue; }
       secs[v] += step / 1000;
