@@ -31,7 +31,11 @@ fs.writeFileSync(path.join(HQ, 'roster.json'), JSON.stringify(roster));
 for (const p of ['proj/nexus', 'proj/locqa', 'proj/tutor', 'proj/scratch', 'proj/gone']) fs.mkdirSync(path.join(HOME, p), { recursive: true });
 const TX = path.join(HOME, 'transcripts'); fs.mkdirSync(TX);
 
-const NOW = Date.now(), iso = sec => new Date(NOW - sec * 1000).toISOString();
+// Fixtures are dated up to ~20 min before the clock, and tokens and the report count "today". In the first
+// hours after local midnight they split across two days and the checks fail (CI at 00:09 UTC, 2026-11-26),
+// so then the clock moves back into the previous evening.
+const testClock = () => { const t = Date.now(), d = new Date(t); return t - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() < 2 * 3600e3 ? t - 2 * 3600e3 : t; };
+const NOW = testClock(), iso = sec => new Date(NOW - sec * 1000).toISOString();
 const cwd = p => path.join(HOME, p);
 const txp = id => path.join(TX, id + '.jsonl');
 const events = [];
@@ -264,7 +268,7 @@ fs.writeFileSync(path.join(CX, '.agent-hq', 'roster.json'), JSON.stringify({ tea
   { id: 'ca', name: 'CxAsk', team: 'Codex', source: 'codex', folders: ['~/p/ask'] },
   { id: 'co', name: 'CxOld', team: 'Codex', source: 'codex', folders: ['~/p/old'] },
   { id: 'csh', name: 'CxShared', team: 'Codex', source: 'codex', folders: ['~/p/shared'] }] }));
-const cxNow = Date.now();
+const cxNow = testClock();
 for (const [id, dir, state, at] of [['w', 'work', 'working', cxNow], ['r', 'run', 'running', cxNow], ['s', 'rest', 'resting', cxNow], ['a', 'ask', 'waiting', cxNow], ['o', 'old', 'resting', cxNow - 40 * 60000], ['sh', 'shared', 'working', cxNow], ['u', 'unlisted', 'working', cxNow]])
   writeCodexSession(CX, { id: 'cx-' + id, cwd: path.join(CX, 'p', dir), now: at, state });
 const snapshot = dir => { const out = []; const walk = d => { for (const f of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, f.name); if (f.isDirectory()) walk(p); else { const st = fs.statSync(p); out.push(`${p}|${st.size}|${st.mtimeMs}`); } } }; walk(dir); return out.sort().join('\n'); };
