@@ -99,4 +99,4 @@ The project's rules (built-ins only, no outside URLs, frame-rate and leak budget
 
 ## License
 
-[MIT](LICENSE). Three.js, vendored in `vendor/`, is also MIT.
+[MIT](LICENSE). Three.js, vendored in `vendor/`, is also MIT: see [vendor/LICENSE](vendor/LICENSE).
